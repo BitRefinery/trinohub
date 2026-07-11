@@ -1,0 +1,22 @@
+name: "❓ Question / support"
+description: Ask how to do something with TrinoHub.
+title: "[Question]: "
+labels: ["question", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For general "how do I…" questions. If you suspect a bug, use the Bug
+        report template instead. Check the [`docs/`](../tree/main/docs) folder first —
+        it may already be answered.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to accomplish? What have you tried?

@@ -1,0 +1,65 @@
+name: "🐞 Bug report"
+description: Something in TrinoHub is broken or behaves incorrectly.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! Please fill this out so a maintainer (or the
+        automated agent) can reproduce and fix it quickly. **Never paste real AWS
+        keys, session tokens, or bootstrap tokens** — redact them first.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: "When I click Resume on a suspended cluster, the UI shows 'Suspending' forever…"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, ordered steps. Include the exact SQL / cluster preset / catalog if relevant.
+      placeholder: |
+        1. Create a Balanced cluster
+        2. Suspend it
+        3. Run a query against it
+        4. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Relevant lines from the control-plane log (`journalctl -u trinohub` or uvicorn output). Redact secrets.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `git rev-parse --short HEAD` or the release tag you installed.
+      placeholder: "e.g. v0.1.0 or d0e9522"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are you running it?
+      options:
+        - AWS CloudFormation / AMI
+        - Local (venv + uvicorn)
+        - Docker
+        - Other (describe above)
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I removed any real credentials, tokens, account IDs, or private hostnames.
+          required: true

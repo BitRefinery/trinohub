@@ -1,0 +1,35 @@
+{
+  "groups": [
+    {
+      "id": "everyone",
+      "label": "For everyone",
+      "admin": false,
+      "topics": [
+        { "slug": "getting-started", "title": "Getting started" },
+        { "slug": "running-queries", "title": "Running queries" },
+        { "slug": "ask-trino", "title": "Ask Trino" },
+        { "slug": "notebooks", "title": "Notebooks" },
+        { "slug": "query-history", "title": "Query history" },
+        { "slug": "scheduled-jobs", "title": "Scheduled jobs" },
+        { "slug": "understanding-clusters", "title": "Understanding clusters" }
+      ]
+    },
+    {
+      "id": "admins",
+      "label": "For admins",
+      "admin": true,
+      "topics": [
+        { "slug": "first-run-setup", "title": "First-run setup" },
+        { "slug": "managing-clusters", "title": "Managing clusters" },
+        { "slug": "accelerated-clusters", "title": "Accelerated clusters" },
+        { "slug": "cluster-domains", "title": "Cluster domains & connections" },
+        { "slug": "catalogs", "title": "Catalogs & data sources" },
+        { "slug": "users-and-roles", "title": "Users & roles" },
+        { "slug": "data-security", "title": "Data security" },
+        { "slug": "sso", "title": "Single sign-on (SSO)" },
+        { "slug": "automation-and-api", "title": "Automation & API" },
+        { "slug": "settings-and-security", "title": "Settings & security" }
+      ]
+    }
+  ]
+}

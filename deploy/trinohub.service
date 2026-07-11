@@ -1,0 +1,25 @@
+[Unit]
+Description=TrinoHub control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trinohub
+Group=trinohub
+WorkingDirectory=/sites/trinohub
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TRINOHUB_DB=/sites/trinohub/.trinohub/trinohub.sqlite3
+Environment=TRINOHUB_STATIC_DIR=/sites/trinohub/web
+ExecStart=/sites/trinohub/.venv/bin/uvicorn trinohub.api:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/sites/trinohub/.trinohub
+
+[Install]
+WantedBy=multi-user.target

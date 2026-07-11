@@ -1,0 +1,32 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.pem
+*.key
+.env
+.env.*
+.trinohub/
+node_modules/
+.venv/
+venv/
+
+.claude/settings.local.json
+
+# Internal / non-codebase docs & agent artifacts (kept locally, not pushed)
+AGENTS.md
+CLAUDE.md
+claude-fix.md
+PLAN.md
+MVP-CHECKLIST.md
+what-is-trinohub.md
+TrinoHub-Review-and-Roadmap.md
+UI_redesign.md
+github-plan.md
+vendor-connector-docs/
+
+# issue-agent local config (never commit)
+automation/agent.env
+
+# internal GTM plan (kept local)
+GTM.md

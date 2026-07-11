@@ -1,0 +1,1625 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrinoHub</title>
+    <link rel="icon" type="image/svg+xml" href="./logo.svg" />
+    <link rel="stylesheet" href="./styles.css?v=16" />
+    <script>
+      // Apply the saved theme before first paint to avoid a light/dark flash.
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem("trinohub-theme") === "dark" ? "dark" : "light";
+      } catch (err) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+  </head>
+  <body>
+    <div class="auth-screen" id="loginScreen" hidden>
+      <form class="auth-card panel" id="loginForm">
+        <div class="auth-brand">
+          <div class="brand-mark" aria-hidden="true"><img src="./logo.svg" alt="" /></div>
+          <div>
+            <div class="brand-name">Trino<span class="brand-hub">Hub</span></div>
+            <div class="brand-subtitle">Managed Trino clusters</div>
+          </div>
+        </div>
+        <h2>Sign in</h2>
+        <p class="auth-intro">Use your TrinoHub account to manage clusters and run queries.</p>
+        <label>
+          <span>Username</span>
+          <input id="loginUsername" type="text" autocomplete="username" required />
+        </label>
+        <label>
+          <span>Password</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" required />
+        </label>
+        <p class="auth-error" id="loginError" hidden></p>
+        <button class="primary-button" id="loginSubmit" type="submit">Sign in</button>
+        <a class="secondary-button full-width" id="ssoLoginButton" href="/api/auth/oidc/login" hidden>
+          Sign in with SSO
+        </a>
+      </form>
+    </div>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><img src="./logo.svg" alt="" /></div>
+          <div>
+            <div class="brand-name">Trino<span class="brand-hub">Hub</span></div>
+            <div class="brand-subtitle">Managed Trino clusters</div>
+          </div>
+        </div>
+
+        <nav class="nav-list">
+          <button class="nav-item active" data-view-target="setup" type="button">
+            <span data-icon="wand"></span>
+            <span>First-run setup</span>
+          </button>
+          <button class="nav-item" data-view-target="clusters" type="button">
+            <span data-icon="server"></span>
+            <span>Clusters</span>
+          </button>
+          <button class="nav-item" data-view-target="catalogs" type="button">
+            <span data-icon="database"></span>
+            <span>Catalogs</span>
+          </button>
+          <button class="nav-item" data-view-target="sql" type="button">
+            <span data-icon="terminal"></span>
+            <span>SQL editor</span>
+          </button>
+          <button class="nav-item" data-view-target="notebooks" type="button">
+            <span data-icon="book"></span>
+            <span>Notebooks</span>
+          </button>
+          <button class="nav-item" data-view-target="ask" type="button">
+            <span data-icon="sparkles"></span>
+            <span>Ask Trino</span>
+          </button>
+          <button class="nav-item" data-view-target="history" type="button">
+            <span data-icon="history"></span>
+            <span>Query history</span>
+          </button>
+          <button class="nav-item" data-view-target="jobs" type="button">
+            <span data-icon="clock"></span>
+            <span>Scheduled jobs</span>
+          </button>
+          <button class="nav-item" data-view-target="docs" type="button">
+            <span data-icon="book"></span>
+            <span>Docs</span>
+          </button>
+          <button class="nav-item admin-only" data-view-target="users" type="button">
+            <span data-icon="users"></span>
+            <span>Users</span>
+          </button>
+          <button class="nav-item admin-only" data-view-target="settings" type="button">
+            <span data-icon="settings"></span>
+            <span>Settings</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-status">
+          <span class="status-dot"></span>
+          <div>
+            <strong>Control plane</strong>
+            <span>Ready on EC2</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Environment</p>
+            <h1 id="viewTitle">First-run setup</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="pill">
+              <span data-icon="cloud"></span>
+              <span id="topbarRegion">checking</span>
+            </div>
+            <div class="pill healthy" id="topbarIamPill">
+              <span class="status-dot"></span>
+              <span id="topbarIamStatus">Checking IAM</span>
+            </div>
+            <div class="theme-toggle" role="group" aria-label="Theme">
+              <button type="button" data-theme-set="light" title="Light theme" aria-label="Light theme">
+                <span data-icon="sun"></span>
+              </button>
+              <button type="button" data-theme-set="dark" title="Dark theme" aria-label="Dark theme">
+                <span data-icon="moon"></span>
+              </button>
+            </div>
+            <label class="role-switcher" id="roleSwitcher" hidden title="Preview TrinoHub as another role. The API still enforces your real permissions.">
+              <span>View as</span>
+              <select id="roleSelect" aria-label="View TrinoHub as another role">
+                <option value="admin">Admin</option>
+                <option value="user">Analyst</option>
+              </select>
+            </label>
+            <div class="account-menu" id="accountMenu" hidden>
+              <span class="account-name" id="accountName"></span>
+              <button class="ghost-button" id="logoutButton" type="button">
+                <span data-icon="logout"></span>
+                Sign out
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="view active" id="view-setup" data-title="First-run setup">
+            <div class="wizard-layout">
+              <div class="panel wizard-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Bootstrap</p>
+                    <h2>Configure this TrinoHub AMI</h2>
+                  </div>
+                  <span class="chip success">Step <span id="wizardStepNumber">1</span> of 5</span>
+                </div>
+
+                <ol class="stepper" aria-label="Setup steps">
+                  <li class="step active" data-step-marker="0">Status</li>
+                  <li class="step" data-step-marker="1">Admin</li>
+                  <li class="step" data-step-marker="2">AWS</li>
+                  <li class="step" data-step-marker="3">Network</li>
+                  <li class="step" data-step-marker="4">Review</li>
+                </ol>
+
+                <div class="wizard-step active" data-step="0">
+                  <div class="setup-status-grid">
+                    <div class="metric">
+                      <span class="metric-label">Instance profile</span>
+                      <strong id="instanceProfileStatus">Checking</strong>
+                      <span class="metric-note" id="instanceProfileName">metadata</span>
+                    </div>
+                    <div class="metric">
+                      <span class="metric-label">SQLite store</span>
+                      <strong id="sqliteStatus">Ready</strong>
+                      <span class="metric-note">.trinohub/trinohub.sqlite3</span>
+                    </div>
+                    <div class="metric">
+                      <span class="metric-label">UI network</span>
+                      <strong id="uiNetworkStatus">Pending</strong>
+                      <span class="metric-note" id="uiNetworkNote">set allowed CIDRs</span>
+                    </div>
+                  </div>
+                  <div class="callout">
+                    <span data-icon="shield"></span>
+                    <div>
+                      <strong>No AWS access keys stored</strong>
+                      <p>The control plane uses the EC2 instance profile and passes a node role to cluster instances.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="wizard-step" data-step="1">
+                  <div class="form-grid">
+                    <label>
+                      <span>Admin username</span>
+                      <input id="setupAdmin" type="text" placeholder="e.g. admin" autocomplete="username" />
+                    </label>
+                    <label>
+                      <span>Email</span>
+                      <input id="setupEmail" type="email" placeholder="you@company.com" autocomplete="email" />
+                    </label>
+                    <label>
+                      <span>Password</span>
+                      <input id="setupPassword" type="password" placeholder="At least 10 characters" />
+                    </label>
+                    <label>
+                      <span>Confirm password</span>
+                      <input id="setupPasswordConfirm" type="password" placeholder="Repeat password" />
+                    </label>
+                    <label class="span-2">
+                      <span>Setup token</span>
+                      <input id="setupToken" type="text" placeholder="From the service log (journalctl -u trinohub) or /sites/trinohub/.trinohub/setup-token" />
+                      <small class="field-hint">One-time token minted on first boot. Required so only someone with host access can create the first admin.</small>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="wizard-step" data-step="2">
+                  <div class="form-grid">
+                    <label>
+                      <span>AWS region</span>
+                      <select id="setupRegion">
+                        <option>us-east-1</option>
+                        <option>us-east-2</option>
+                        <option>us-west-2</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Control-plane role</span>
+                      <input id="setupControlRole" value="TrinoHubControlPlaneRole" readonly />
+                    </label>
+                    <label>
+                      <span>Node instance profile</span>
+                      <input id="setupNodeProfile" value="TrinoHubNodeRole" />
+                    </label>
+                    <label>
+                      <span>Validation status</span>
+                      <button class="secondary-button validate-button" id="setupValidationStatus" type="button">
+                        <span data-icon="check"></span>
+                        Checking permissions
+                      </button>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="wizard-step" data-step="3">
+                  <div class="form-grid">
+                    <label>
+                      <span>VPC</span>
+                      <select id="setupVpc">
+                        <option>Loading VPCs</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Private subnets</span>
+                      <input id="setupSubnets" value="" />
+                    </label>
+                    <label>
+                      <span>Cluster security group</span>
+                      <input id="setupSecurityGroup" value="" />
+                    </label>
+                    <label>
+                      <span>Allowed UI CIDRs</span>
+                      <input id="setupAllowedCidrs" value="" placeholder="203.0.113.22/32" />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="wizard-step" data-step="4">
+                  <div class="review-list">
+                    <div>
+                      <span>First admin</span>
+                      <strong id="reviewAdmin">admin</strong>
+                    </div>
+                    <div>
+                      <span>AWS region</span>
+                      <strong id="reviewRegion">us-east-1</strong>
+                    </div>
+                    <div>
+                      <span>Cluster networking</span>
+                      <strong>Private subnets, allowlisted UI</strong>
+                    </div>
+                    <div>
+                      <span>Credential model</span>
+                      <strong>Instance profile only</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="wizard-actions">
+                  <button class="secondary-button" id="wizardBack" type="button">
+                    <span data-icon="arrow-left"></span>
+                    Back
+                  </button>
+                  <button class="primary-button" id="wizardNext" type="button">
+                    Next
+                    <span data-icon="arrow-right"></span>
+                  </button>
+                </div>
+              </div>
+
+              <aside class="panel readiness-panel">
+                <div class="panel-header compact">
+                  <h3>Readiness</h3>
+                  <span class="chip info" id="readinessChip">Checking</span>
+                </div>
+                <ul class="check-list" id="readinessChecks">
+                  <li><span data-icon="info"></span> Waiting for live checks</li>
+                </ul>
+                <div class="mini-resource-map">
+                  <div class="resource-node control">TrinoHub</div>
+                  <div class="resource-link"></div>
+                  <div class="resource-node">Coordinator</div>
+                  <div class="resource-link"></div>
+                  <div class="resource-node">Workers ASG</div>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <section class="view" id="view-clusters" data-title="Clusters">
+            <div class="toolbar">
+              <div class="search-field">
+                <span data-icon="search"></span>
+                <input id="clusterSearch" type="search" placeholder="Search clusters or catalogs" />
+              </div>
+              <div class="segmented" role="group" aria-label="Status filter">
+                <button class="segment active" data-filter="all" type="button">All</button>
+                <button class="segment" data-filter="running" type="button">Running</button>
+                <button class="segment" data-filter="suspended" type="button">Suspended</button>
+              </div>
+              <button class="primary-button admin-action" id="openCreateCluster" type="button">
+                <span data-icon="plus"></span>
+                Create cluster
+              </button>
+            </div>
+
+            <div class="table-panel panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Instance type</th>
+                    <th>Trino</th>
+                    <th>Region</th>
+                    <th>Workers</th>
+                    <th>Autoscaling</th>
+                    <th>Auto-suspend</th>
+                    <th>Owner</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="clusterRows"></tbody>
+              </table>
+            </div>
+
+            <div class="itype-modal" id="connectModal" hidden>
+              <div class="itype-modal-dialog connect-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="connectModalTitle">
+                <div class="itype-modal-head">
+                  <div>
+                    <h2 id="connectModalTitle">Connect to cluster</h2>
+                    <p id="connectModalSub">Copy a connection string for your client.</p>
+                  </div>
+                  <button class="ghost-button itype-modal-close" id="closeConnectModal" type="button" aria-label="Close" title="Close">
+                    <span data-icon="x"></span>
+                  </button>
+                </div>
+                <div class="itype-modal-body" id="connectModalBody"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-create" data-title="Create cluster">
+            <div class="create-layout">
+              <div class="panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Cluster configuration</p>
+                    <h2>Create Trino cluster</h2>
+                  </div>
+                  <button class="secondary-button" data-view-target="clusters" type="button">
+                    <span data-icon="x"></span>
+                    Close
+                  </button>
+                </div>
+
+                <div class="form-grid compact-form">
+                  <label class="span-2">
+                    <span>Cluster name</span>
+                    <input id="newClusterName" value="ad-hoc-analytics" />
+                  </label>
+                  <label>
+                    <span>Auto-suspend</span>
+                    <select id="newAutoSuspend">
+                      <option value="15">15 minutes</option>
+                      <option value="30">30 minutes</option>
+                      <option value="60">1 hour</option>
+                      <option value="240">4 hours</option>
+                      <option value="">Never</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Trino version</span>
+                    <select id="newTrinoVersion"></select>
+                  </label>
+                </div>
+
+                <h3 class="section-title">Instance type</h3>
+                <div class="preset-grid" id="instanceTypeGrid" role="radiogroup" aria-label="Instance type">
+                  <p class="instance-empty">Loading instance types…</p>
+                </div>
+
+                <h3 class="section-title">Acceleration</h3>
+                <div class="toggle-list">
+                  <label class="toggle-row">
+                    <input type="checkbox" id="newAccelerated" />
+                    <span>Accelerated (warm cache)</span>
+                    <small>Caches hot S3 data on node-local NVMe for Hive, Iceberg, and Delta Lake catalogs.
+                    Needs an NVMe instance type (i4i, r6id, i3en) and a fixed worker count.
+                    The cache is lost when the cluster suspends, so accelerated clusters default to a long auto-suspend.</small>
+                  </label>
+                </div>
+
+                <h3 class="section-title">Workers</h3>
+                <div class="mode-row">
+                  <button class="mode-option selected" data-worker-mode="autoscale" type="button">
+                    <span data-icon="activity"></span>
+                    Trino-aware autoscaling
+                  </button>
+                  <button class="mode-option" data-worker-mode="fixed" type="button">
+                    <span data-icon="sliders"></span>
+                    Fixed size
+                  </button>
+                </div>
+
+                <div class="slider-grid">
+                  <label>
+                    <span>Minimum workers</span>
+                    <input id="minWorkers" type="range" min="1" max="10" value="2" />
+                    <strong><span id="minWorkersValue">2</span> workers</strong>
+                  </label>
+                  <label>
+                    <span>Maximum workers</span>
+                    <input id="maxWorkers" type="range" min="2" max="20" value="8" />
+                    <strong><span id="maxWorkersValue">8</span> workers</strong>
+                  </label>
+                </div>
+
+                <h3 class="section-title">Catalogs</h3>
+                <div class="toggle-list">
+                  <label class="toggle-row">
+                    <input type="checkbox" checked disabled />
+                    <span>system</span>
+                    <small>Cluster metadata</small>
+                  </label>
+                  <label class="toggle-row">
+                    <input type="checkbox" checked />
+                    <span>tpch</span>
+                    <small>Benchmark sample data</small>
+                  </label>
+                  <label class="toggle-row">
+                    <input type="checkbox" checked />
+                    <span>tpcds</span>
+                    <small>Decision-support sample data</small>
+                  </label>
+                  <div id="clusterCatalogChoices"></div>
+                </div>
+              </div>
+
+              <aside class="panel review-panel sticky-panel">
+                <div class="panel-header compact">
+                  <h3>Review</h3>
+                  <span class="chip info">Estimated resources</span>
+                </div>
+                <div class="review-list tight">
+                  <div>
+                    <span>Coordinator</span>
+                    <strong id="reviewCoordinator">1 x t2.large</strong>
+                  </div>
+                  <div>
+                    <span>Worker capacity</span>
+                    <strong id="reviewWorkers">2-8 workers</strong>
+                  </div>
+                  <div>
+                    <span>Autoscaler</span>
+                    <strong id="reviewScaler">Query queue + CPU</strong>
+                  </div>
+                  <div>
+                    <span>Catalogs</span>
+                    <strong id="reviewCatalogs">system, tpch, tpcds, analytics_s3</strong>
+                  </div>
+                </div>
+                <div class="cost-note">
+                  <span data-icon="info"></span>
+                  <p>Start creates billable AWS resources tagged with <code>ManagedBy=TrinoHub</code> and <code>TrinoHubCluster</code>.</p>
+                </div>
+                <button class="primary-button full-width admin-action" id="createClusterButton" type="button">
+                  <span data-icon="server"></span>
+                  Create cluster
+                </button>
+              </aside>
+            </div>
+          </section>
+
+          <section class="view" id="view-cluster-detail" data-title="Cluster detail">
+            <div class="cluster-hero panel">
+              <div>
+                <p class="eyebrow">Cluster</p>
+                <h2 id="detailName">lakehouse-prod</h2>
+                <div class="cluster-meta">
+                  <span class="chip success" id="detailStatus">Running</span>
+                  <span id="detailRegion"></span>
+                  <span id="detailInstanceType"></span>
+                  <span id="detailWorkerRange"></span>
+                </div>
+                <p class="cold-start-banner" id="detailColdStart" hidden></p>
+              </div>
+              <div class="action-row">
+                <a class="secondary-button" id="clusterDetailUiLink" target="_blank" rel="noopener noreferrer" hidden>
+                  <span data-icon="external-link"></span>
+                  Coordinator UI
+                </a>
+                <button class="secondary-button admin-action" id="clusterDetailSuspend" type="button">
+                  <span data-icon="pause"></span>
+                  Suspend
+                </button>
+                <button class="secondary-button admin-action" id="clusterDetailDisable" type="button">
+                  <span data-icon="shield"></span>
+                  Disable
+                </button>
+                <button class="secondary-button admin-action" id="clusterDetailStart" type="button">
+                  <span data-icon="play"></span>
+                  Start
+                </button>
+                <button class="secondary-button admin-action" id="clusterDetailEdit" type="button">
+                  <span data-icon="settings"></span>
+                  Edit
+                </button>
+                <button class="danger-button admin-action" id="clusterDetailDelete" type="button">
+                  <span data-icon="trash"></span>
+                  Delete
+                </button>
+              </div>
+            </div>
+
+            <div class="metrics-grid">
+              <div class="metric panel">
+                <span class="metric-label">Active workers</span>
+                <strong id="detailWorkersMetric">-</strong>
+                <span class="metric-note" id="detailWorkersNote">No live capacity loaded</span>
+              </div>
+              <div class="metric panel">
+                <span class="metric-label">Running queries</span>
+                <strong id="detailQueriesMetric">-</strong>
+                <span class="metric-note" id="detailQueriesNote">No queue sample loaded</span>
+              </div>
+              <div class="metric panel">
+                <span class="metric-label">CPU</span>
+                <strong id="detailCpuMetric">-</strong>
+                <span class="metric-note" id="detailCpuNote">No CloudWatch sample loaded</span>
+              </div>
+              <div class="metric panel">
+                <span class="metric-label">Auto-suspend</span>
+                <strong id="detailSuspendMetric">-</strong>
+                <span class="metric-note" id="detailSuspendNote">Configured interval</span>
+              </div>
+              <div class="metric panel">
+                <span class="metric-label">Est. cost</span>
+                <strong id="detailCostMetric">-</strong>
+                <span class="metric-note cost-note" id="detailCostNote">Coordinator + workers, approx</span>
+              </div>
+            </div>
+
+            <div class="detail-grid">
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Cluster resources</h3>
+                  <span class="chip info">AWS managed</span>
+                </div>
+                <div class="resource-diagram" id="detailResourceDiagram">
+                  <div class="diagram-node">No AWS resources loaded</div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Utilization</h3>
+                  <span class="chip" id="detailUtilizationChip">No data yet</span>
+                </div>
+                <div class="util-list" id="detailUtilization">
+                  <p class="util-empty">No utilization samples yet. Data appears after the autoscaler takes its first reading.</p>
+                </div>
+                <div id="detailStatsChart"></div>
+              </div>
+            </div>
+
+            <div class="panel table-panel">
+              <div class="panel-header compact">
+                <h3>Recent scaling events</h3>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Event</th>
+                    <th>Signal</th>
+                    <th>Capacity</th>
+                  </tr>
+                </thead>
+                <tbody id="detailScalingRows">
+                  <tr><td colspan="4">No scaling events loaded.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Source-grouped catalog workbench. One view, three states driven by
+               catalogView (list | edit | pick) in app.js — no separate routes.
+               The list/editor/picker bodies are rendered by app.js into the
+               #catalog*State containers; only these shells live in markup. -->
+          <section class="view" id="view-catalogs" data-title="Catalogs">
+            <div class="cat-head">
+              <div>
+                <p class="cat-eyebrow">Catalogs</p>
+                <h2 class="cat-title" id="catalogViewTitle">Data sources</h2>
+              </div>
+              <span class="cat-iam" title="The setup AWS identity passed validation">
+                <span class="cat-iam-dot"></span>IAM validated
+              </span>
+              <button class="cat-add admin-action" id="catalogAddBtn" type="button" data-catalog-add>
+                <span data-icon="plus"></span>
+                Add catalog
+              </button>
+            </div>
+
+            <!-- STATE: list -->
+            <div class="cat-state" id="catalogListState">
+              <div class="cat-toolbar">
+                <label class="cat-search">
+                  <span data-icon="search"></span>
+                  <input id="catalogSearch" type="search" placeholder="Search by name, host or type" autocomplete="off" />
+                </label>
+                <div class="cat-seg" role="tablist" aria-label="Group catalogs by">
+                  <button class="cat-seg-btn active" type="button" data-group-by="source" role="tab" aria-selected="true">By source</button>
+                  <button class="cat-seg-btn" type="button" data-group-by="status" role="tab" aria-selected="false">By status</button>
+                </div>
+              </div>
+              <div id="catalogGroups"></div>
+            </div>
+
+            <!-- STATE: edit (full-canvas editor rendered by renderCatalogEditor) -->
+            <div class="cat-state" id="catalogEditorState" hidden>
+              <button class="cat-back" type="button" data-catalog-back>
+                <span data-icon="arrow-left"></span>All catalogs
+              </button>
+              <div id="catalogEditor"></div>
+            </div>
+
+            <!-- STATE: pick (full-page connector picker rendered by renderCatalogPicker) -->
+            <div class="cat-state" id="catalogPickerState" hidden>
+              <button class="cat-back" type="button" data-catalog-back>
+                <span data-icon="arrow-left"></span>All catalogs
+              </button>
+              <div class="cat-pick-head">
+                <h2 class="cat-pick-title">Connect a data source</h2>
+                <p class="cat-pick-intro">Each catalog connects to one data source. Pick a connector to configure it, then attach the catalog to a cluster to start querying.</p>
+              </div>
+              <div id="catalogPickerBody"></div>
+            </div>
+          </section>
+
+          <section class="view" id="view-sql" data-title="SQL editor">
+            <div class="sql-workspace">
+              <div class="sql-edge-rail left" data-sql-sidebar-rail="left" hidden>
+                <button class="sql-edge-button" type="button" data-sql-sidebar-toggle="left" data-sql-sidebar-label="schema browser" aria-controls="schemaBrowserPanel" aria-expanded="true" aria-label="Close schema browser" title="Close schema browser">
+                  <span data-icon="chevron-right"></span>
+                  <span>Schema</span>
+                </button>
+              </div>
+              <aside class="panel schema-browser sql-sidebar-panel" id="schemaBrowserPanel" data-sql-sidebar-panel="left">
+                <div class="schema-browser-head sql-sidebar-head">
+                  <span class="schema-browser-head-label">Schema browser</span>
+                  <button class="ghost-button sidebar-toggle" type="button" data-sql-sidebar-toggle="left" data-sql-sidebar-label="schema browser" aria-controls="schemaBrowserPanel" aria-expanded="true" aria-label="Close schema browser" title="Close schema browser">
+                    <span data-icon="chevron-left"></span>
+                  </button>
+                </div>
+                <div class="schema-search">
+                  <input type="search" id="schemaSearch" placeholder="Search loaded catalogs, tables, columns…" aria-label="Search schema browser" autocomplete="off" />
+                </div>
+                <div class="schema-tree" id="schemaTree">
+                  <div class="schema-node catalog">
+                    <span data-icon="chevron-down"></span>
+                    <span class="icon db" data-icon="database"></span>tpch
+                  </div>
+                  <div class="schema-node schema indent-1">
+                    <span data-icon="chevron-down"></span>sf1
+                  </div>
+                  <div class="schema-node table indent-2" data-table="tpch.sf1.customer">
+                    <span data-icon="table"></span>customer
+                  </div>
+                  <div class="schema-node table indent-2 active" data-table="tpch.sf1.nation">
+                    <span data-icon="table"></span>nation
+                  </div>
+                  <div class="schema-node table indent-2" data-table="tpch.sf1.region">
+                    <span data-icon="table"></span>region
+                  </div>
+                  <div class="schema-node table indent-2" data-table="tpch.sf1.orders">
+                    <span data-icon="table"></span>orders
+                  </div>
+                  <div class="schema-node table indent-2" data-table="tpch.sf1.lineitem">
+                    <span data-icon="table"></span>lineitem
+                  </div>
+                  <div class="schema-node catalog">
+                    <span data-icon="chevron-right"></span>
+                    <span class="icon db" data-icon="database"></span>analytics_s3
+                  </div>
+                </div>
+              </aside>
+
+              <div class="sql-center">
+                <div class="sql-context-bar">
+                  <label class="context-pill">
+                    <span>Cluster</span>
+                    <select id="queryCluster">
+                      <option>lakehouse-prod</option>
+                      <option>sandbox</option>
+                      <option>ad-hoc-analytics</option>
+                    </select>
+                  </label>
+                  <label class="context-pill">
+                    <span>Catalog</span>
+                    <select id="queryCatalog">
+                      <option>tpch</option>
+                      <option>analytics_s3</option>
+                      <option>system</option>
+                    </select>
+                  </label>
+                  <label class="context-pill">
+                    <span>Schema</span>
+                    <select id="querySchema">
+                      <option>sf1</option>
+                      <option>information_schema</option>
+                    </select>
+                  </label>
+                  <div class="context-spacer"></div>
+                  <div class="run-mode" role="group" aria-label="Run mode">
+                    <button class="active" type="button" data-run-mode="current">Current</button>
+                    <button type="button" data-run-mode="selected">Selected</button>
+                    <button type="button" data-run-mode="all">All</button>
+                  </div>
+                  <button class="secondary-button" id="openSqlSearch" type="button">
+                    <span data-icon="search"></span>
+                    Find
+                  </button>
+                  <button class="secondary-button" id="formatSql" type="button">
+                    <span data-icon="wand"></span>
+                    Format
+                  </button>
+                  <button class="secondary-button" id="openCommandPalette" type="button">
+                    <span data-icon="terminal"></span>
+                    Commands
+                  </button>
+                  <button class="secondary-button" id="saveQuery" type="button">
+                    <span data-icon="check"></span>
+                    Save
+                  </button>
+                  <button class="secondary-button" id="cancelQuery" type="button" disabled>
+                    <span data-icon="x"></span>
+                    Cancel
+                  </button>
+                  <button class="secondary-button" id="runAndDownload" type="button">
+                    <span data-icon="download"></span>
+                    Run CSV
+                  </button>
+                  <button class="secondary-button" id="explainQuery" type="button" title="Show the query plan without executing">
+                    <span data-icon="activity"></span>
+                    Explain
+                  </button>
+                  <button class="primary-button" id="runQuery" type="button">
+                    <span data-icon="play"></span>
+                    Run
+                  </button>
+                </div>
+
+                <div class="code-card">
+                  <div class="code-tabbar" id="queryTabBar" role="tablist" aria-label="Query tabs">
+                    <div class="code-tab active">
+                      <button type="button"><span class="dot"></span><span>query-1.sql</span></button>
+                    </div>
+                    <button class="code-tab-add" id="addQueryTab" type="button" title="New query tab" aria-label="New query tab">
+                      <span data-icon="plus"></span>
+                    </button>
+                  </div>
+                  <div class="sql-search-bar" id="sqlSearchBar" hidden>
+                    <label class="sql-search-field">
+                      <span>Find</span>
+                      <input id="sqlSearchInput" type="search" autocomplete="off" />
+                    </label>
+                    <label class="sql-search-field">
+                      <span>Replace</span>
+                      <input id="sqlReplaceInput" type="text" autocomplete="off" />
+                    </label>
+                    <span class="sql-search-count" id="sqlSearchCount">0 of 0</span>
+                    <button class="ghost-button" id="sqlSearchPrev" type="button" aria-label="Previous match" title="Previous match">
+                      <span data-icon="arrow-left"></span>
+                    </button>
+                    <button class="ghost-button" id="sqlSearchNext" type="button" aria-label="Next match" title="Next match">
+                      <span data-icon="arrow-right"></span>
+                    </button>
+                    <button class="secondary-button" id="sqlReplaceOne" type="button">Replace</button>
+                    <button class="secondary-button" id="sqlReplaceAll" type="button">All</button>
+                    <button class="ghost-button" id="closeSqlSearch" type="button" aria-label="Close find and replace" title="Close">
+                      <span data-icon="x"></span>
+                    </button>
+                  </div>
+                  <div class="sql-editor-shell">
+                    <pre class="sql-line-numbers" id="sqlLineNumbers" aria-hidden="true">1</pre>
+                    <pre class="sql-highlight" id="sqlHighlight" aria-hidden="true"></pre>
+                    <textarea class="sql-editor" id="sqlText" spellcheck="false">SELECT nationkey, name, regionkey
+FROM tpch.sf1.nation
+ORDER BY nationkey
+LIMIT 10;</textarea>
+                    <div class="sql-autocomplete" id="sqlAutocomplete" hidden></div>
+                  </div>
+                </div>
+
+                <div class="panel results-card">
+                  <div class="results-tabs">
+                    <button class="results-tab active" type="button" data-result-view="results">Results</button>
+                    <button class="results-tab" type="button" data-result-view="chart">Chart</button>
+                    <button class="results-tab" type="button" data-result-view="profile">Query profile</button>
+                    <div class="query-result-nav" id="queryResultNav" hidden></div>
+                    <div class="results-tabs-spacer"></div>
+                    <span class="chip neutral" id="queryStatus">Ready</span>
+                    <span class="results-meta">Elapsed <strong id="queryElapsed">0.0s</strong> · Rows <strong id="queryRows">0</strong></span>
+                    <button class="ghost-button" id="downloadCsv" type="button" disabled>
+                      <span data-icon="download"></span>
+                      CSV
+                    </button>
+                  </div>
+                  <div class="results-table" id="resultsTable" aria-live="polite">
+                    <div class="empty-results">Run a query to see results.</div>
+                  </div>
+                </div>
+              </div>
+
+              <aside class="sql-side-rail sql-sidebar-panel" id="querySidebarPanel" data-sql-sidebar-panel="right">
+                <aside class="panel query-history-panel" id="recentQueriesPanel">
+                  <div class="panel-header compact sql-sidebar-head">
+                    <h3>Recent queries</h3>
+                    <div class="panel-header-actions">
+                      <span class="chip info">7 days</span>
+                      <button class="ghost-button sidebar-toggle" type="button" data-sql-sidebar-toggle="right" data-sql-sidebar-label="query side panel" aria-controls="querySidebarPanel" aria-expanded="true" aria-label="Close query side panel" title="Close query side panel">
+                        <span data-icon="chevron-right"></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="query-list" id="inlineHistory">
+                    <button type="button">
+                      <strong>Finished</strong>
+                      <span>SELECT * FROM tpch.sf1.nation LIMIT 10</span>
+                      <small>lakehouse-prod - 4.2s</small>
+                    </button>
+                    <button type="button">
+                      <strong>Failed</strong>
+                      <span>SELECT count(*) FROM analytics_s3.events</span>
+                      <small>sandbox - syntax error</small>
+                    </button>
+                    <button type="button">
+                      <strong>Finished</strong>
+                      <span>SHOW CATALOGS</span>
+                      <small>sandbox - 0.8s</small>
+                    </button>
+                  </div>
+                </aside>
+                <aside class="panel saved-query-panel" id="savedQueriesPanel">
+                  <div class="panel-header compact sql-sidebar-head">
+                    <h3>Saved queries</h3>
+                    <div class="panel-header-actions">
+                      <span class="chip neutral" id="savedQueryCount">0</span>
+                      <button class="ghost-button sidebar-toggle" type="button" data-sql-sidebar-toggle="right" data-sql-sidebar-label="query side panel" aria-controls="querySidebarPanel" aria-expanded="true" aria-label="Close query side panel" title="Close query side panel">
+                        <span data-icon="chevron-right"></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="saved-query-content" id="savedQueryPanelBody">
+                    <div class="saved-query-tools">
+                      <div class="search-field">
+                        <span data-icon="search"></span>
+                        <input id="savedQuerySearch" type="search" placeholder="Find saved SQL" />
+                      </div>
+                      <select id="savedQuerySort" aria-label="Sort saved queries">
+                        <option value="updated">Updated</option>
+                        <option value="name">Name</option>
+                        <option value="created">Created</option>
+                      </select>
+                    </div>
+                    <div class="query-list saved-query-list" id="savedQueryList">
+                      <div class="empty-results">No saved queries.</div>
+                    </div>
+                  </div>
+                </aside>
+              </aside>
+              <div class="sql-edge-rail right" data-sql-sidebar-rail="right" hidden>
+                <button class="sql-edge-button" type="button" data-sql-sidebar-toggle="right" data-sql-sidebar-label="recent queries" data-sql-sidebar-focus="recentQueriesPanel" aria-controls="querySidebarPanel" aria-expanded="true" aria-label="Close recent queries" title="Close recent queries">
+                  <span data-icon="chevron-left"></span>
+                  <span>Recent</span>
+                </button>
+                <button class="sql-edge-button" type="button" data-sql-sidebar-toggle="right" data-sql-sidebar-label="saved queries" data-sql-sidebar-focus="savedQueriesPanel" aria-controls="querySidebarPanel" aria-expanded="true" aria-label="Close saved queries" title="Close saved queries">
+                  <span data-icon="chevron-left"></span>
+                  <span>Saved</span>
+                </button>
+              </div>
+            </div>
+            <div class="command-palette" id="commandPalette" hidden>
+              <div class="command-dialog" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+                <div class="command-header">
+                  <span data-icon="terminal"></span>
+                  <input id="commandSearch" type="search" autocomplete="off" aria-labelledby="commandPaletteTitle" />
+                  <button class="ghost-button" id="closeCommandPalette" type="button" aria-label="Close commands" title="Close">
+                    <span data-icon="x"></span>
+                  </button>
+                </div>
+                <h2 id="commandPaletteTitle">SQL commands</h2>
+                <div class="command-list" id="commandList" role="listbox"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-notebooks" data-title="Notebooks">
+            <div class="notebook-list-pane" id="notebookListPane">
+              <div class="panel table-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Notebooks</p>
+                    <h2>Your notebooks</h2>
+                  </div>
+                  <button class="primary-button" id="newNotebook" type="button">
+                    <span data-icon="plus"></span>
+                    New notebook
+                  </button>
+                </div>
+                <div class="notebook-list" id="notebookList">
+                  <div class="empty-results">No notebooks yet. Create one to get started.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="notebook-canvas" id="notebookCanvas" hidden>
+              <div class="notebook-context-bar">
+                <button class="secondary-button" id="notebookBack" type="button">
+                  <span data-icon="arrow-left"></span>
+                  Notebooks
+                </button>
+                <label class="context-pill notebook-name-pill">
+                  <span>Name</span>
+                  <input type="text" id="notebookName" autocomplete="off" />
+                </label>
+                <label class="context-pill">
+                  <span>Cluster</span>
+                  <select id="notebookCluster"></select>
+                </label>
+                <label class="context-pill">
+                  <span>Catalog</span>
+                  <select id="notebookCatalog"></select>
+                </label>
+                <label class="context-pill">
+                  <span>Schema</span>
+                  <select id="notebookSchema"></select>
+                </label>
+                <div class="context-spacer"></div>
+                <button class="secondary-button" id="notebookAddCell" type="button">
+                  <span data-icon="plus"></span>
+                  Add cell
+                </button>
+                <button class="primary-button" id="notebookRunAll" type="button">
+                  <span data-icon="play"></span>
+                  Run all
+                </button>
+              </div>
+              <div class="notebook-workspace">
+                <aside class="panel schema-browser notebook-schema-browser">
+                  <div class="schema-browser-head">
+                    <span class="schema-browser-head-label">Schema browser</span>
+                  </div>
+                  <div class="schema-search">
+                    <input type="search" id="notebookSchemaSearch" placeholder="Search loaded catalogs, tables, columns…" aria-label="Search notebook schema browser" autocomplete="off" />
+                  </div>
+                  <div class="schema-tree" id="notebookSchemaTree">
+                    <div class="schema-empty">Pick a cluster for this notebook to browse its data.</div>
+                  </div>
+                </aside>
+                <div class="notebook-cells" id="notebookCells" aria-live="polite"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-ask" data-title="Ask Trino">
+            <div class="ask-layout">
+              <aside class="ask-rail">
+                <button class="primary-button ask-newchat" id="askNewChat" type="button">
+                  <span data-icon="plus"></span> New chat
+                </button>
+                <label class="ask-field">
+                  <span>Persona</span>
+                  <select id="askPersona">
+                    <option value="Analyst">Analyst</option>
+                    <option value="Data engineer">Data engineer</option>
+                    <option value="Executive">Executive</option>
+                  </select>
+                </label>
+                <label class="ask-field">
+                  <span>Cluster</span>
+                  <select id="askCluster"></select>
+                </label>
+                <label class="ask-field">
+                  <span>Catalog</span>
+                  <select id="askCatalog"></select>
+                </label>
+                <label class="ask-field">
+                  <span>Schema</span>
+                  <select id="askSchema"></select>
+                </label>
+                <div class="ask-rail-tabs" role="tablist">
+                  <button class="ask-rail-tab active" data-ask-tab="suggested" type="button" role="tab">
+                    <span data-icon="sparkles"></span> Suggested
+                  </button>
+                  <button class="ask-rail-tab" data-ask-tab="history" type="button" role="tab">Chat history</button>
+                </div>
+                <div class="ask-rail-body" id="askRailBody"></div>
+              </aside>
+
+              <div class="ask-main">
+                <div class="ask-thread" id="askThread" aria-live="polite"></div>
+                <form class="ask-composer" id="askComposer">
+                  <div class="ask-input-row">
+                    <textarea id="askInput" rows="1" placeholder="Ask me something…" aria-label="Ask a question about your data"></textarea>
+                    <button class="ask-send" id="askSend" type="submit" aria-label="Send">
+                      <span data-icon="send"></span>
+                    </button>
+                  </div>
+                  <p class="ask-disclaimer">
+                    Ask Trino is new to the job and may make mistakes while learning about your data and
+                    organization. Double-check the responses.
+                  </p>
+                </form>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-history" data-title="Query history">
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Query history</p>
+                  <h2>Recent activity</h2>
+                </div>
+                <div class="search-field compact-search">
+                  <span data-icon="search"></span>
+                  <input id="historySearch" type="search" placeholder="Filter history" />
+                </div>
+                <select id="historyStatus" aria-label="Filter by status">
+                  <option value="">Any status</option>
+                  <option value="Finished">Finished</option>
+                  <option value="Failed">Failed</option>
+                  <option value="Running">Running</option>
+                  <option value="Cancelled">Cancelled</option>
+                </select>
+                <select id="historyRole" aria-label="Filter by role">
+                  <option value="">Any role</option>
+                  <option value="admin">Admin</option>
+                  <option value="user">User</option>
+                </select>
+                <select id="historyDate" aria-label="Filter by date">
+                  <option value="">Any date</option>
+                  <option value="today">Today</option>
+                  <option value="week">7 days</option>
+                </select>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Query</th>
+                    <th>Cluster</th>
+                    <th>User</th>
+                    <th>Elapsed</th>
+                    <th>Rows</th>
+                  </tr>
+                </thead>
+                <tbody id="historyRows"></tbody>
+              </table>
+            </div>
+            <div class="panel query-detail-panel" id="queryDetailPanel" hidden>
+              <div class="panel-header compact">
+                <h3 id="queryDetailTitle">Query detail</h3>
+                <div class="detail-actions">
+                  <button class="secondary-button" id="openHistoryQuery" type="button">
+                    <span data-icon="arrow-right"></span>
+                    Open
+                  </button>
+                  <button class="secondary-button" id="copyHistoryQuery" type="button">
+                    <span data-icon="check"></span>
+                    Copy
+                  </button>
+                  <button class="secondary-button" id="saveHistoryQuery" type="button">
+                    <span data-icon="plus"></span>
+                    Save
+                  </button>
+                </div>
+              </div>
+              <div class="query-detail-grid">
+                <div>
+                  <span>Status</span>
+                  <strong id="queryDetailStatus">-</strong>
+                </div>
+                <div>
+                  <span>Cluster</span>
+                  <strong id="queryDetailCluster">-</strong>
+                </div>
+                <div>
+                  <span>Context</span>
+                  <strong id="queryDetailContext">-</strong>
+                </div>
+                <div>
+                  <span>Elapsed</span>
+                  <strong id="queryDetailElapsed">-</strong>
+                </div>
+                <div>
+                  <span>Rows</span>
+                  <strong id="queryDetailRows">-</strong>
+                </div>
+                <div>
+                  <span>User</span>
+                  <strong id="queryDetailUser">-</strong>
+                </div>
+              </div>
+              <pre class="query-detail-sql" id="queryDetailSql"></pre>
+              <div class="query-detail-error" id="queryDetailError" hidden></div>
+            </div>
+          </section>
+
+          <section class="view" id="view-jobs" data-title="Scheduled jobs">
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Automation</p>
+                  <h2>Scheduled SQL jobs</h2>
+                </div>
+                <button class="primary-button" id="openCreateJob" type="button">
+                  <span data-icon="plus"></span>
+                  Create job
+                </button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Job</th>
+                    <th>Cluster</th>
+                    <th>Schedule</th>
+                    <th>Runs as</th>
+                    <th>Last run</th>
+                    <th>Next run</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="jobRows">
+                  <tr><td colspan="7">No scheduled jobs yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="panel table-panel" id="jobRunsPanel" hidden>
+              <div class="panel-header compact">
+                <h3 id="jobRunsTitle">Recent runs</h3>
+                <button class="ghost-button" id="closeJobRuns" type="button">Close</button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Started</th>
+                    <th>Attempt</th>
+                    <th>Status</th>
+                    <th>Elapsed</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody id="jobRunRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="view" id="view-users" data-title="Users">
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Access</p>
+                  <h2>Local users</h2>
+                </div>
+                <button class="primary-button admin-action" id="openCreateUser" type="button">
+                  <span data-icon="user-plus"></span>
+                  Create user
+                </button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="userRows"></tbody>
+              </table>
+            </div>
+
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Access</p>
+                  <h2>Roles</h2>
+                </div>
+                <button class="secondary-button admin-action" id="openCreateRole" type="button">
+                  <span data-icon="shield"></span>
+                  Create role
+                </button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Privileges</th>
+                    <th>Cluster access</th>
+                    <th>Catalog access</th>
+                    <th>Members</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="roleRows"></tbody>
+              </table>
+            </div>
+
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Data security</p>
+                  <h2>Data policies</h2>
+                </div>
+                <button class="secondary-button admin-action" id="openCreateDataPolicy" type="button">
+                  <span data-icon="shield"></span>
+                  Create policy
+                </button>
+              </div>
+              <p class="instance-picker-hint">
+                Table/column/row-level restrictions per role, enforced inside Trino via
+                file-based access control. Users in roles with policies are limited to
+                exactly those policies; everyone else keeps full access. Applied when a
+                cluster (re)starts.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Scope</th>
+                    <th>Privileges</th>
+                    <th>Columns</th>
+                    <th>Row filter</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="dataPolicyRows"><tr><td colspan="6">No data policies.</td></tr></tbody>
+              </table>
+            </div>
+
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Data security</p>
+                  <h2>Tags &amp; classification</h2>
+                </div>
+                <div>
+                  <button class="ghost-button admin-action" id="runClassifierButton" type="button">Scan for PII</button>
+                  <button class="secondary-button admin-action" id="openCreateTag" type="button">Tag entity</button>
+                  <button class="secondary-button admin-action" id="openCreateTagPolicy" type="button">Tag policy</button>
+                </div>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Entity</th>
+                    <th>Tag</th>
+                    <th>Status</th>
+                    <th>Source</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="entityTagRows"><tr><td colspan="5">No tags.</td></tr></tbody>
+              </table>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Tag</th>
+                    <th>Role</th>
+                    <th>Effect</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="tagPolicyRows"><tr><td colspan="4">No tag policies.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="view" id="view-settings" data-title="Settings">
+            <div class="settings-grid">
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>AWS configuration</h3>
+                  <span class="chip neutral" id="settingsValidationChip">Loading</span>
+                </div>
+                <div class="review-list">
+                  <div><span>Region</span><strong id="settingsRegion">-</strong></div>
+                  <div><span>VPC</span><strong id="settingsVpc">-</strong></div>
+                  <div><span>Node profile</span><strong id="settingsNodeProfile">-</strong></div>
+                  <div><span>UI CIDRs</span><strong id="settingsUiCidrs">-</strong></div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Cluster connectivity</h3>
+                  <span class="chip neutral" id="baseDomainChip">Not set</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Base domain for client connection strings. Each cluster is addressed as
+                    <code>&lt;cluster-name&gt;.&lt;base-domain&gt;</code> over HTTPS/443. TrinoHub only
+                    renders the name — point a wildcard <code>*.&lt;base-domain&gt;</code> DNS record at
+                    your coordinators. Leave blank to show the coordinator IP instead.
+                  </p>
+                  <div class="base-domain-row">
+                    <input type="text" id="settingsBaseDomain" class="admin-action"
+                      placeholder="trino.acme.internal" autocomplete="off"
+                      aria-label="Cluster base domain" />
+                    <button class="secondary-button admin-action" id="saveBaseDomainButton" type="button">
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Node instance types</h3>
+                  <span class="chip neutral" id="instanceTypeChip">0 selected</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Memory-optimized types recommended for Trino. Only enabled types appear on the
+                    Create cluster screen.
+                  </p>
+                  <div class="instance-summary" id="instanceTypeSummary">
+                    <p class="instance-empty">Loading instance types…</p>
+                  </div>
+                  <div class="instance-summary-foot">
+                    <span class="instance-cost-note" id="instanceTypeCostNote"></span>
+                    <button class="secondary-button admin-action" id="editInstanceTypesButton" type="button" disabled>
+                      <span data-icon="sliders"></span>
+                      Edit instance types
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>API</h3>
+                  <span class="chip success">OpenAPI</span>
+                </div>
+                <div class="review-list">
+                  <div>
+                    <span>Interactive docs</span>
+                    <a class="secondary-button link-button" href="/docs" target="_blank" rel="noopener">Open docs</a>
+                  </div>
+                  <div>
+                    <span>Schema</span>
+                    <a class="ghost-button link-button" href="/openapi.json" target="_blank" rel="noopener">Open JSON</a>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Single sign-on (OIDC)</h3>
+                  <span class="chip neutral" id="ssoChip">Disabled</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Authorization-code flow against any OIDC provider (Okta, Entra ID, Google).
+                    IdP groups map to TrinoHub roles on every sign-in.
+                  </p>
+                  <div class="form-grid compact-form">
+                    <label class="span-2">
+                      <span>Issuer URL</span>
+                      <input id="ssoIssuer" class="admin-action" placeholder="https://login.example.com" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span>Client ID</span>
+                      <input id="ssoClientId" class="admin-action" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span>Client secret</span>
+                      <input id="ssoClientSecret" class="admin-action" type="password" placeholder="Leave blank to keep current" autocomplete="new-password" />
+                    </label>
+                    <label>
+                      <span>Group claim</span>
+                      <input id="ssoGroupClaim" class="admin-action" placeholder="groups" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span>Password login</span>
+                      <select id="ssoPasswordLogin" class="admin-action">
+                        <option value="all">Everyone</option>
+                        <option value="operators_only">Operators only (break-glass)</option>
+                      </select>
+                    </label>
+                    <label class="span-2">
+                      <span>Group → role mappings (one per line: idp-group = role)</span>
+                      <textarea id="ssoMappings" class="admin-action" rows="3" placeholder="data-eng = admin&#10;analysts = user"></textarea>
+                    </label>
+                  </div>
+                  <div class="instance-summary-foot">
+                    <label class="app-dialog-check" style="text-transform:none">
+                      <input type="checkbox" id="ssoEnabled" class="admin-action" />
+                      <span>Enable SSO sign-in</span>
+                    </label>
+                    <button class="secondary-button admin-action" id="saveSsoButton" type="button">Save SSO settings</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Sessions</h3>
+                  <span class="chip neutral" id="sessionChip">12 h</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Browser session lifetime. Shortening it does not revoke existing sessions —
+                    use "Sign out everywhere" to force re-authentication now.
+                  </p>
+                  <div class="base-domain-row">
+                    <input type="number" id="sessionHoursInput" class="admin-action" min="1" max="168" aria-label="Session lifetime in hours" />
+                    <button class="secondary-button admin-action" id="saveSessionHoursButton" type="button">Save</button>
+                    <button class="ghost-button" id="revokeSessionsButton" type="button">Sign out everywhere</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Notifications</h3>
+                  <span class="chip neutral" id="notificationsChip">Off</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    JSON webhook (Slack-compatible <code>text</code> field) fired on the selected
+                    events. Leave the URL blank to disable.
+                  </p>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>Webhook URL</span>
+                    <input id="notifyWebhookUrl" class="admin-action" placeholder="https://hooks.slack.com/services/…" autocomplete="off" />
+                  </label>
+                  <div class="app-dialog-checks" id="notifyEventChecks"></div>
+                  <div class="instance-summary-foot">
+                    <span></span>
+                    <button class="secondary-button admin-action" id="saveNotificationsButton" type="button">Save notifications</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Ask Trino</h3>
+                  <span class="chip neutral" id="askModelChip">Default</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    The OpenRouter model Ask Trino uses to write SQL. Paste any model id from
+                    <code>openrouter.ai/models</code> (for example <code>anthropic/claude-sonnet-4.5</code>).
+                    Leave blank to use the built-in default. The <code>OPENROUTER_API_KEY</code> stays in
+                    the server environment and is never shown here.
+                  </p>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>OpenRouter model id</span>
+                    <input id="askModelInput" class="admin-action" placeholder="anthropic/claude-sonnet-4.5" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="instance-summary-foot">
+                    <span id="askModelHint" class="instance-picker-hint"></span>
+                    <button class="secondary-button admin-action" id="saveAskModelButton" type="button">Save model</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel span-2" id="apiTokensPanel">
+                <div class="panel-header compact">
+                  <h3>API tokens</h3>
+                  <button class="secondary-button" id="createApiTokenButton" type="button">
+                    <span data-icon="key"></span>
+                    Create token
+                  </button>
+                </div>
+                <p class="instance-picker-hint">
+                  Long-lived bearer tokens for scripts and BI tools: send
+                  <code>Authorization: Bearer &lt;token&gt;</code> to any <code>/api/*</code> endpoint.
+                  A token acts as its user and inherits that user's roles. Create service accounts in
+                  the Users view for automation identities.
+                </p>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>User</th>
+                      <th>Created</th>
+                      <th>Expires</th>
+                      <th>Last used</th>
+                      <th class="actions-col">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="apiTokenRows">
+                    <tr><td colspan="6">No tokens.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="panel span-2" id="auditLogPanel">
+                <div class="panel-header compact">
+                  <h3>Security audit log</h3>
+                  <span class="chip neutral" id="auditLogChip">-</span>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Actor</th>
+                      <th>Action</th>
+                      <th>Target</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody id="auditLogRows">
+                    <tr><td colspan="5">No entries loaded.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="itype-modal" id="instanceTypeModal" hidden>
+              <div class="itype-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="itypeModalTitle">
+                <div class="itype-modal-head">
+                  <div>
+                    <h2 id="itypeModalTitle">Select instance types</h2>
+                    <p>Only enabled types will appear in cluster creation.</p>
+                  </div>
+                  <button class="ghost-button itype-modal-close" id="closeInstanceTypeModal" type="button" aria-label="Close" title="Close">
+                    <span data-icon="x"></span>
+                  </button>
+                </div>
+                <div class="itype-modal-tools">
+                  <div class="itype-search">
+                    <span data-icon="search"></span>
+                    <input type="search" id="instanceTypeSearch" placeholder="Search (r7i, 64 GiB, xlarge…)" autocomplete="off" aria-label="Search instance types" />
+                  </div>
+                  <div class="itype-presets">
+                    <button class="ghost-button" type="button" data-itype-preset="recommended">
+                      <span data-icon="sparkles"></span> Trino recommended
+                    </button>
+                    <button class="ghost-button" type="button" data-itype-preset="cost">💰 Cost optimized</button>
+                  </div>
+                </div>
+                <div class="itype-modal-body" id="instanceTypeModalList"></div>
+                <div class="itype-modal-foot">
+                  <div class="itype-foot-info">
+                    <span class="itype-foot-count" id="instanceTypeModalCount">0 selected</span>
+                    <span class="itype-foot-cost" id="instanceTypeModalCost"></span>
+                  </div>
+                  <div class="itype-foot-actions">
+                    <button class="secondary-button" id="cancelInstanceTypeModal" type="button">Cancel</button>
+                    <button class="primary-button" id="saveInstanceTypeModal" type="button">Save selection</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-docs" data-title="Docs">
+            <div class="docs-layout">
+              <aside class="panel docs-sidebar" id="docsSidebar" aria-label="Documentation topics">
+                <div class="empty-results">Loading docs…</div>
+              </aside>
+              <div class="panel docs-content" id="docsContent" aria-live="polite">
+                <div class="empty-results">Select a topic to begin.</div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- Generic branded dialog: replaces window.confirm/prompt so billable and
+         destructive actions get real context, styling, and keyboard handling. -->
+    <div class="app-dialog-backdrop" id="appDialogBackdrop" hidden>
+      <div class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle">
+        <h3 id="appDialogTitle"></h3>
+        <p class="app-dialog-body" id="appDialogBody" hidden></p>
+        <form class="app-dialog-fields" id="appDialogForm" hidden></form>
+        <div class="app-dialog-actions">
+          <button class="secondary-button" id="appDialogCancel" type="button">Cancel</button>
+          <button class="primary-button" id="appDialogConfirm" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js?v=22"></script>
+  </body>
+</html>

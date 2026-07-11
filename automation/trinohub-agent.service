@@ -1,0 +1,15 @@
+# systemd service — one shot of the issue agent. Paired with trinohub-agent.timer.
+# Install to ~/.config/systemd/user/ (user service) or /etc/systemd/system/ (edit User=).
+[Unit]
+Description=TrinoHub issue agent (headless Claude Code on triaged issues)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Point this at where you cloned the repo:
+WorkingDirectory=%h/trinohub/automation
+EnvironmentFile=%h/trinohub/automation/agent.env
+ExecStart=/usr/bin/env bash %h/trinohub/automation/run-agent.sh
+# Keep the agent from wedging forever:
+TimeoutStartSec=3600

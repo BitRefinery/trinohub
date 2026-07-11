@@ -1,0 +1,273 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  TrinoHub control plane — one-click launch. Creates the control-plane IAM role
+  (instance-profile auth, no static keys), the TrinoHubNodeRole passed to cluster
+  nodes, a security group, and an EC2 instance that bootstraps and runs the app.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Networking & access" }
+        Parameters: [VpcId, SubnetId, AllowedUiCidr, InstanceType, SshKeyName]
+      - Label: { default: "Source" }
+        Parameters: [RepoUrl, GitRef]
+      - Label: { default: "Data (node role)" }
+        Parameters: [WarehouseBucket]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch the control plane into.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A PUBLIC subnet (auto-assign public IP) in the chosen VPC.
+  AllowedUiCidr:
+    Type: String
+    Description: >-
+      CIDR allowed to reach the UI (ports 80/8000). Use YOUR IP as x.x.x.x/32.
+      Do NOT use 0.0.0.0/0 for anything but a throwaway trial.
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$"
+    ConstraintDescription: Must be a valid CIDR like 203.0.113.4/32.
+  InstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues: [t3.medium, t3.large, t3.xlarge, m7i.large, m7i.xlarge]
+    Description: Control-plane instance size (the app itself is light; this is not a Trino node).
+  SshKeyName:
+    Type: String
+    Default: ""
+    Description: (Optional) existing EC2 key pair name for break-glass SSH. Leave blank for none.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/BitRefinery/trinohub.git
+    Description: Git URL to clone TrinoHub from.
+  GitRef:
+    Type: String
+    Default: main
+    Description: Branch or tag to deploy.
+  WarehouseBucket:
+    Type: String
+    Default: REPLACE-ME-warehouse-bucket
+    Description: >-
+      S3 bucket name for Iceberg/Glue catalogs (scopes the node role). You can
+      update the stack with the real bucket later; the control plane launches
+      regardless.
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Latest Ubuntu 24.04 LTS AMI (resolved automatically; leave as-is).
+
+Conditions:
+  HasSshKey: !Not [!Equals [!Ref SshKeyName, ""]]
+
+Resources:
+  # ---- Node role passed to Trino cluster nodes (S3 + Glue for Iceberg) ---------
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: TrinoHubNodeRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TrinoHubNodeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: IcebergWarehouseObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "arn:aws:s3:::${WarehouseBucket}/*"
+              - Sid: IcebergWarehouseBucket
+                Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !Sub "arn:aws:s3:::${WarehouseBucket}"
+              - Sid: GlueIcebergCatalog
+                Effect: Allow
+                Action:
+                  [glue:GetDatabase, glue:GetDatabases, glue:CreateDatabase,
+                   glue:GetTable, glue:GetTables, glue:CreateTable, glue:UpdateTable, glue:DeleteTable,
+                   glue:GetPartition, glue:GetPartitions, glue:BatchGetPartition,
+                   glue:CreatePartition, glue:BatchCreatePartition, glue:UpdatePartition, glue:DeletePartition]
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*"
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: TrinoHubNodeRole
+      Roles: [!Ref NodeRole]
+
+  # ---- Control-plane role (the app authenticates as this; no static keys) ------
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: TrinoHubControlPlaneRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Lets you reach the box via SSM Session Manager (console) to read the
+        # first-run setup token, with no SSH port open.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: TrinoHubControlPlane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadOnlyDiscovery
+                Effect: Allow
+                Action:
+                  [sts:GetCallerIdentity, ec2:DescribeVpcs, ec2:DescribeSubnets,
+                   ec2:DescribeSecurityGroups, ec2:DescribeImages, ec2:DescribeKeyPairs,
+                   ec2:DescribeInstances, autoscaling:DescribeAutoScalingGroups,
+                   cloudwatch:ListMetrics, cloudwatch:GetMetricStatistics]
+                Resource: "*"
+              - Sid: ManageClusterCompute
+                Effect: Allow
+                Action:
+                  [ec2:RunInstances, ec2:TerminateInstances, ec2:CreateTags,
+                   ec2:CreateSecurityGroup, ec2:DeleteSecurityGroup,
+                   ec2:AuthorizeSecurityGroupIngress, ec2:RevokeSecurityGroupIngress,
+                   ec2:CreateLaunchTemplate, ec2:DeleteLaunchTemplate,
+                   autoscaling:CreateAutoScalingGroup, autoscaling:UpdateAutoScalingGroup,
+                   autoscaling:DeleteAutoScalingGroup]
+                Resource: "*"
+              - Sid: ManageCatalogCredentials
+                Effect: Allow
+                Action:
+                  [secretsmanager:CreateSecret, secretsmanager:PutSecretValue,
+                   secretsmanager:GetSecretValue, secretsmanager:DescribeSecret,
+                   secretsmanager:DeleteSecret]
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:trinohub/catalog/*"
+              - Sid: PassNodeRoleToEc2
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt NodeRole.Arn
+                Condition:
+                  StringEquals: { iam:PassedToService: ec2.amazonaws.com }
+              - Sid: AutoScalingServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*"
+                Condition:
+                  StringEquals: { iam:AWSServiceName: autoscaling.amazonaws.com }
+
+  ControlPlaneInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref ControlPlaneRole]
+
+  # ---- Security group for the control plane ------------------------------------
+  ControlPlaneSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TrinoHub control plane access
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80,   ToPort: 80,   CidrIp: !Ref AllowedUiCidr, Description: HTTP UI }
+        - { IpProtocol: tcp, FromPort: 8000, ToPort: 8000, CidrIp: !Ref AllowedUiCidr, Description: App direct }
+      Tags:
+        - { Key: ManagedBy, Value: TrinoHub }
+        - { Key: Name, Value: trinohub-control-plane }
+
+  ControlPlaneSshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasSshKey
+    Properties:
+      GroupId: !Ref ControlPlaneSg
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref AllowedUiCidr
+      Description: SSH (break-glass)
+
+  # ---- The control-plane instance ----------------------------------------------
+  ControlPlaneInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref UbuntuAmi
+      IamInstanceProfile: !Ref ControlPlaneInstanceProfile
+      KeyName: !If [HasSshKey, !Ref SshKeyName, !Ref "AWS::NoValue"]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref ControlPlaneSg]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 30, VolumeType: gp3, DeleteOnTermination: true }
+      Tags:
+        - { Key: ManagedBy, Value: TrinoHub }
+        - { Key: Name, Value: trinohub-control-plane }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y python3-venv python3-pip git nginx
+          # SSM agent for console-based access (token retrieval without SSH)
+          snap install amazon-ssm-agent --classic || true
+          systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+          id trinohub &>/dev/null || useradd --system --create-home --home-dir /opt/trinohub --shell /usr/sbin/nologin trinohub
+          install -d -o trinohub -g trinohub /opt/trinohub
+          sudo -u trinohub git clone --branch "${GitRef}" --depth 1 "${RepoUrl}" /opt/trinohub/app
+          cd /opt/trinohub/app
+          sudo -u trinohub python3 -m venv .venv
+          sudo -u trinohub .venv/bin/pip install --upgrade pip
+          sudo -u trinohub .venv/bin/pip install -r requirements.txt
+          install -d -o trinohub -g trinohub /opt/trinohub/app/.trinohub
+
+          cat >/etc/systemd/system/trinohub.service <<'UNIT'
+          [Unit]
+          Description=TrinoHub control plane
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=trinohub
+          Group=trinohub
+          WorkingDirectory=/opt/trinohub/app
+          Environment=PYTHONUNBUFFERED=1
+          Environment=TRINOHUB_DB=/opt/trinohub/app/.trinohub/trinohub.sqlite3
+          Environment=TRINOHUB_STATIC_DIR=/opt/trinohub/app/web
+          ExecStart=/opt/trinohub/app/.venv/bin/uvicorn trinohub.api:app --host 0.0.0.0 --port 8000
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=true
+          ProtectSystem=full
+          ReadWritePaths=/opt/trinohub/app/.trinohub
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          cp /opt/trinohub/app/deploy/nginx-trinohub.conf /etc/nginx/sites-available/trinohub
+          ln -sfn /etc/nginx/sites-available/trinohub /etc/nginx/sites-enabled/trinohub
+          rm -f /etc/nginx/sites-enabled/default
+          systemctl daemon-reload
+          systemctl enable --now trinohub
+          nginx -t && systemctl reload nginx
+
+Outputs:
+  UiUrl:
+    Description: Open this to reach the setup wizard.
+    Value: !Sub "http://${ControlPlaneInstance.PublicIp}/"
+  SetupTokenHint:
+    Description: The first-run setup token is printed to the service log and a root-only file.
+    Value: !Sub "SSH in (if enabled) then: sudo journalctl -u trinohub | grep 'Setup token'  —OR—  sudo cat /opt/trinohub/app/.trinohub/setup-token"
+  ControlPlaneRoleName:
+    Description: Instance-profile role the app uses (no static keys).
+    Value: !Ref ControlPlaneRole
+  InstanceId:
+    Value: !Ref ControlPlaneInstance

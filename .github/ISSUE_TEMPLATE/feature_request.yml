@@ -1,0 +1,53 @@
+name: "✨ Feature request"
+description: Suggest a new capability or improvement.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Feature requests help shape the roadmap. Note the
+        project's **non-goals** (see the README) — multi-cloud, Kubernetes, BYO
+        Terraform, and cloning any commercial product's UI are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the user need, not just the solution. Who hits this and when?
+      placeholder: "As an analyst, I can't tell which cluster is cheapest for a given query, so I…"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should TrinoHub do? Sketch the UI/API if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, workarounds you use today, or prior art.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Clusters / autoscaling
+        - Catalogs / connectors
+        - SQL editor / notebooks
+        - Query history / scheduling
+        - Security / auth / data access
+        - Observability / cost
+        - Install / deploy
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true

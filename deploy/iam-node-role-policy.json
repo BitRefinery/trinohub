@@ -1,0 +1,50 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IcebergWarehouseObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::WAREHOUSE_BUCKET/*"
+    },
+    {
+      "Sid": "IcebergWarehouseBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::WAREHOUSE_BUCKET"
+    },
+    {
+      "Sid": "GlueIcebergCatalog",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:CreateDatabase",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:CreateTable",
+        "glue:UpdateTable",
+        "glue:DeleteTable",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:BatchGetPartition",
+        "glue:CreatePartition",
+        "glue:BatchCreatePartition",
+        "glue:UpdatePartition",
+        "glue:DeletePartition"
+      ],
+      "Resource": [
+        "arn:aws:glue:REGION:ACCOUNT_ID:catalog",
+        "arn:aws:glue:REGION:ACCOUNT_ID:database/*",
+        "arn:aws:glue:REGION:ACCOUNT_ID:table/*/*"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+# systemd timer — run the issue agent once a day. Enable with:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trinohub-agent.timer
+[Unit]
+Description=Run the TrinoHub issue agent daily
+
+[Timer]
+# 09:15 local time each day, with jitter; catches up if the machine was off.
+OnCalendar=*-*-* 09:15:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

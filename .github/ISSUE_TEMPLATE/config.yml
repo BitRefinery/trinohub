@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔐 Security vulnerability
+    url: https://github.com/BitRefinery/trinohub/security/advisories/new
+    about: Please report security issues privately — do NOT open a public issue. See SECURITY.md.
+  - name: 💬 Discussions
+    url: https://github.com/BitRefinery/trinohub/discussions
+    about: Open-ended ideas, show-and-tell, and Q&A that isn't a bug or feature request.
