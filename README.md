@@ -20,9 +20,11 @@ all from one box, with no static AWS credentials and a Trino-aware autoscaler.
 ## What is TrinoHub?
 
 TrinoHub ships as a **control-plane AMI**: a single EC2 instance running the TrinoHub
-UI + API, a local SQLite database, and an AWS orchestration service. From that one box,
-operators launch and manage **separate EC2-based Trino coordinator/worker clusters** and
-data catalogs. Analysts pick a cluster, write SQL, and pull results.
+UI + API, a local SQLite database, and an AWS orchestration service. It installs **into your
+own VPC**, so clusters and query data stay inside your AWS account — nothing routes through a
+TrinoHub-hosted service. From that one box, operators launch and manage **separate EC2-based
+Trino coordinator/worker clusters** and data catalogs. Analysts pick a cluster, write SQL, and
+pull results.
 
 It replaces the "spin up Trino by hand with Terraform/Ansible" workflow with a few clicks
 and a Trino-aware autoscaler — while keeping the security model tight: the control plane
@@ -188,6 +190,9 @@ FastAPI route tests if dependencies are missing):
 
 ## Security model
 
+- **Runs entirely in your own AWS account** — the control plane and every Trino cluster are
+  deployed into **your VPC**. Query data flows between your worker nodes and your S3/Glue over
+  your own network and IAM; it never traverses a TrinoHub-hosted service or leaves your account.
 - **No AWS static credentials, ever** — instance-profile auth for the control plane, a passed
   node role for clusters. The UI never displays AWS keys or secrets.
 - **Allowed-UI-CIDR enforcement** at the application layer (loopback health/node-config exempt).
