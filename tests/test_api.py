@@ -197,6 +197,36 @@ class FastApiRouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": 1})
 
+    def test_ui_cidr_settings_route_updates_allowlist(self):
+        # Settings privilege required: unauthenticated callers get a 401.
+        status, _, _ = self.client.request(
+            "PUT", "/api/security/ui-cidrs", {"allowed_ui_cidrs": ["203.0.113.4/32"]}
+        )
+        self.assertEqual(status, 401)
+
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/setup/complete",
+            {"username": "admin", "password": "correct-horse-password", "node_instance_profile": "TrinoHubNodeRole"},
+        )
+        self.assertEqual(status, 201)
+
+        status, _, body = self.client.request("GET", "/api/security/ui-cidrs")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"allowed_ui_cidrs": []})
+
+        status, _, body = self.client.request(
+            "PUT", "/api/security/ui-cidrs", {"allowed_ui_cidrs": ["203.0.113.4", "2001:db8::/64"]}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["allowed_ui_cidrs"], ["203.0.113.4/32", "2001:db8::/64"])
+
+        # The middleware now enforces the list; this test client's peer address
+        # ("testclient") is outside it, so the very next request is refused.
+        status, _, body = self.client.request("GET", "/api/security/ui-cidrs")
+        self.assertEqual(status, 403)
+        self.assertIn("allowed UI CIDR", body["error"])
+
     def test_preset_tiers_route_requires_auth_and_resolves(self):
         status, _, body = self.client.request("GET", "/api/preset-tiers")
         self.assertEqual(status, 401)

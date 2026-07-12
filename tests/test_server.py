@@ -289,6 +289,89 @@ class ServerModelTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status, 400)
 
+    def test_setup_rejects_allowed_ui_cidrs_that_lock_out_requester(self):
+        payload = {
+            "username": "admin",
+            "password": "correct-horse-password",
+            "allowed_ui_cidrs": ["203.0.113.4/32"],
+        }
+        with self.assertRaises(ApiError) as context:
+            self.app.complete_setup(payload, remote_addr="198.51.100.5")
+        self.assertEqual(context.exception.status, 400)
+        self.assertIn("198.51.100.5", context.exception.message)
+        self.assertIsNone(self.app.setup_row())
+
+        # Behind the loopback proxy the X-Forwarded-For hop is what gets judged.
+        with self.assertRaises(ApiError):
+            self.app.complete_setup(payload, remote_addr="127.0.0.1", forwarded_for="198.51.100.5")
+
+        # A requester inside the list sails through.
+        result, _ = self.app.complete_setup(payload, remote_addr="203.0.113.4")
+        self.assertEqual(result["setup"]["allowed_ui_cidrs"], ["203.0.113.4/32"])
+
+    def test_setup_lockout_guard_honors_confirm_and_loopback(self):
+        # Explicit confirm_lockout applies the list even though it excludes the caller.
+        result, _ = self.app.complete_setup(
+            {
+                "username": "admin",
+                "password": "correct-horse-password",
+                "allowed_ui_cidrs": ["203.0.113.4/32"],
+                "confirm_lockout": True,
+            },
+            remote_addr="198.51.100.5",
+        )
+        self.assertEqual(result["setup"]["allowed_ui_cidrs"], ["203.0.113.4/32"])
+
+    def test_setup_lockout_guard_skips_loopback_requester(self):
+        # A loopback caller (host access) can always get back in, so no guard.
+        result, _ = self.app.complete_setup(
+            {
+                "username": "admin",
+                "password": "correct-horse-password",
+                "allowed_ui_cidrs": ["203.0.113.4/32"],
+            },
+            remote_addr="127.0.0.1",
+        )
+        self.assertEqual(result["setup"]["allowed_ui_cidrs"], ["203.0.113.4/32"])
+
+    def test_set_allowed_ui_cidrs_requires_completed_setup(self):
+        with self.assertRaises(ApiError) as context:
+            self.app.set_allowed_ui_cidrs({"allowed_ui_cidrs": ["203.0.113.4/32"]})
+        self.assertEqual(context.exception.status, 409)
+
+    def test_set_allowed_ui_cidrs_updates_and_guards_lockout(self):
+        self.app.complete_setup({"username": "admin", "password": "correct-horse-password"})
+        self.assertTrue(self.app.client_ip_allowed(remote_addr="198.51.100.5"))
+
+        # A list excluding the requester is refused and nothing changes.
+        with self.assertRaises(ApiError) as context:
+            self.app.set_allowed_ui_cidrs(
+                {"allowed_ui_cidrs": ["203.0.113.4/32"]}, remote_addr="198.51.100.5"
+            )
+        self.assertEqual(context.exception.status, 400)
+        self.assertTrue(self.app.client_ip_allowed(remote_addr="198.51.100.5"))
+
+        # A list including the requester applies, normalized, and gates others.
+        result = self.app.set_allowed_ui_cidrs(
+            {"allowed_ui_cidrs": ["198.51.100.5", "2001:db8::/64"]}, remote_addr="198.51.100.5"
+        )
+        self.assertEqual(result["allowed_ui_cidrs"], ["198.51.100.5/32", "2001:db8::/64"])
+        self.assertTrue(self.app.client_ip_allowed(remote_addr="198.51.100.5"))
+        self.assertFalse(self.app.client_ip_allowed(remote_addr="203.0.113.4"))
+
+        # confirm_lockout is the explicit escape hatch.
+        result = self.app.set_allowed_ui_cidrs(
+            {"allowed_ui_cidrs": ["203.0.113.4/32"], "confirm_lockout": True},
+            remote_addr="198.51.100.5",
+        )
+        self.assertEqual(result["allowed_ui_cidrs"], ["203.0.113.4/32"])
+        self.assertFalse(self.app.client_ip_allowed(remote_addr="198.51.100.5"))
+
+        # Clearing the list reopens app-level access (the SG still gates).
+        result = self.app.set_allowed_ui_cidrs({"allowed_ui_cidrs": []}, remote_addr="203.0.113.4")
+        self.assertEqual(result["allowed_ui_cidrs"], [])
+        self.assertTrue(self.app.client_ip_allowed(remote_addr="198.51.100.5"))
+
     def test_setup_rejects_failed_aws_validation(self):
         def failed_status(region=None):
             status = FakeAws().full_status(region)

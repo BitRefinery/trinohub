@@ -1332,6 +1332,22 @@ LIMIT 10;</textarea>
                   <div><span>Node profile</span><strong id="settingsNodeProfile">-</strong></div>
                   <div><span>UI CIDRs</span><strong id="settingsUiCidrs">-</strong></div>
                 </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Comma-separated CIDRs allowed to reach the UI (for example
+                    <code>203.0.113.22/32, 198.51.100.0/24</code>). Leave blank to allow any
+                    source your security group admits. Lists that would block your own
+                    address are rejected unless you confirm.
+                  </p>
+                  <div class="base-domain-row">
+                    <input type="text" id="settingsUiCidrsInput" class="admin-action"
+                      placeholder="203.0.113.22/32" autocomplete="off"
+                      aria-label="Allowed UI CIDRs" />
+                    <button class="secondary-button admin-action" id="saveUiCidrsButton" type="button">
+                      Save
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="panel">
                 <div class="panel-header compact">

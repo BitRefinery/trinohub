@@ -1220,6 +1220,35 @@ class TrinoHubApp:
         self.audit(actor, "settings.session_hours", str(hours))
         return {"session_hours": hours}
 
+    def allowed_ui_cidrs_settings(self) -> dict[str, Any]:
+        setup = self.setup_row()
+        return {"allowed_ui_cidrs": loads(setup["allowed_ui_cidrs"], []) if setup else []}
+
+    def set_allowed_ui_cidrs(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any] | None = None,
+        *,
+        remote_addr: str | None = None,
+        forwarded_for: str | None = None,
+    ) -> dict[str, Any]:
+        setup = self.setup_row()
+        if not setup:
+            raise ApiError(409, "Complete setup before configuring the UI allowlist.")
+        cidrs = self.normalize_allowed_ui_cidrs(payload.get("allowed_ui_cidrs"))
+        self._guard_ui_cidr_lockout(
+            cidrs,
+            remote_addr=remote_addr,
+            forwarded_for=forwarded_for,
+            confirmed=payload.get("confirm_lockout") is True,
+        )
+        with self.conn() as conn:
+            conn.execute("UPDATE setup_settings SET allowed_ui_cidrs = ? WHERE id = 1", (dumps(cidrs),))
+        self.audit(actor, "settings.allowed_ui_cidrs", ", ".join(cidrs) or "(unrestricted)")
+        # The TLS gateway mirrors the UI allowlist into its Caddy config.
+        self._sync_tls_gateway_safe()
+        return {"allowed_ui_cidrs": cidrs}
+
     # --- OIDC SSO -------------------------------------------------------------
     # Confidential-client authorization-code flow implemented on the stdlib.
     # The ID token arrives straight from the token endpoint over TLS with
@@ -3114,27 +3143,31 @@ class TrinoHubApp:
                 normalized.append(rendered)
         return normalized
 
-    def client_ip_allowed(self, *, remote_addr: str | None, forwarded_for: str | None = None) -> bool:
-        setup = self.setup_row()
-        cidrs = loads(setup["allowed_ui_cidrs"], []) if setup else []
-        if not cidrs:
-            return True
+    @staticmethod
+    def _effective_client_ip(
+        *, remote_addr: str | None, forwarded_for: str | None = None
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        """The address the UI-CIDR gate judges: the direct peer, except that a
+        loopback peer (the nginx/Caddy front) is unwrapped to the first
+        X-Forwarded-For hop. A non-loopback peer's XFF is untrusted spoofable
+        input and ignored. None when no parseable address is available."""
         remote_text = str(remote_addr or "").strip()
         if not remote_text:
-            return False
+            return None
         try:
             remote_address = ipaddress.ip_address(remote_text)
         except ValueError:
-            return False
+            return None
         candidate = remote_text
         if forwarded_for and remote_address.is_loopback:
             candidate = forwarded_for.split(",", 1)[0].strip() or remote_text
         try:
-            address = ipaddress.ip_address(candidate)
+            return ipaddress.ip_address(candidate)
         except ValueError:
-            return False
-        if address.is_loopback:
-            return True
+            return None
+
+    @staticmethod
+    def _ip_in_cidrs(address: ipaddress.IPv4Address | ipaddress.IPv6Address, cidrs: list[str]) -> bool:
         for cidr in cidrs:
             try:
                 if address in ipaddress.ip_network(str(cidr), strict=False):
@@ -3143,7 +3176,55 @@ class TrinoHubApp:
                 continue
         return False
 
-    def complete_setup(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    def client_ip_allowed(self, *, remote_addr: str | None, forwarded_for: str | None = None) -> bool:
+        setup = self.setup_row()
+        cidrs = loads(setup["allowed_ui_cidrs"], []) if setup else []
+        if not cidrs:
+            return True
+        address = self._effective_client_ip(remote_addr=remote_addr, forwarded_for=forwarded_for)
+        if address is None:
+            return False
+        if address.is_loopback:
+            return True
+        return self._ip_in_cidrs(address, cidrs)
+
+    def _guard_ui_cidr_lockout(
+        self,
+        cidrs: list[str],
+        *,
+        remote_addr: str | None,
+        forwarded_for: str | None,
+        confirmed: bool,
+    ) -> None:
+        """Refuse an allowed-UI-CIDR list that would 403 the requester's own IP
+        on their very next request. An empty list restricts nothing, loopback
+        callers can always reach the app from the host, and ``confirmed`` is
+        the explicit escape hatch for intentionally excluding yourself (e.g.
+        configuring the allowlist for a different network than you're on).
+        Callers without transport context (tests, scripts driving the model
+        directly) pass neither address and skip the check."""
+        if not cidrs or confirmed:
+            return
+        if remote_addr is None and forwarded_for is None:
+            return
+        address = self._effective_client_ip(remote_addr=remote_addr, forwarded_for=forwarded_for)
+        if address is None or address.is_loopback:
+            return
+        if not self._ip_in_cidrs(address, cidrs):
+            suffix = "/32" if address.version == 4 else "/128"
+            raise ApiError(
+                400,
+                f"allowed_ui_cidrs would lock you out: your address {address} is not in the list. "
+                f"Add {address}{suffix}, or resend with confirm_lockout=true to apply it anyway.",
+            )
+
+    def complete_setup(
+        self,
+        payload: dict[str, Any],
+        *,
+        remote_addr: str | None = None,
+        forwarded_for: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
         if self.setup_row():
             raise ApiError(409, "Setup is already complete.")
         self._verify_setup_token(payload.get("setup_token"))
@@ -3182,6 +3263,12 @@ class TrinoHubApp:
 
         node_profile = str(payload.get("node_instance_profile") or "TrinoHubNodeRole").strip()
         allowed_ui_cidrs = self.normalize_allowed_ui_cidrs(payload.get("allowed_ui_cidrs") or [])
+        self._guard_ui_cidr_lockout(
+            allowed_ui_cidrs,
+            remote_addr=remote_addr,
+            forwarded_for=forwarded_for,
+            confirmed=payload.get("confirm_lockout") is True,
+        )
 
         dry_run = self.aws.dry_run_instance_launch(
             region=region,

@@ -624,6 +624,10 @@ function updateLiveSetupUi(status) {
     document.getElementById("settingsVpc").textContent = status.setup.vpc_id || "-";
     document.getElementById("settingsNodeProfile").textContent = status.setup.node_instance_profile || "-";
     document.getElementById("settingsUiCidrs").textContent = status.setup.allowed_ui_cidrs.join(", ") || "local access";
+    const uiCidrsInput = document.getElementById("settingsUiCidrsInput");
+    if (uiCidrsInput && document.activeElement !== uiCidrsInput) {
+      uiCidrsInput.value = status.setup.allowed_ui_cidrs.join(", ");
+    }
     document.getElementById("settingsValidationChip").textContent = aws.ok ? "Validated" : "Needs review";
     document.getElementById("settingsValidationChip").className = `chip ${aws.ok ? "success" : "warning"}`;
     const baseDomain = status.setup.cluster_base_domain || "";
@@ -680,12 +684,31 @@ async function completeSetup() {
     allowed_ui_cidrs: splitList(document.getElementById("setupAllowedCidrs").value)
   };
 
-  try {
-    document.getElementById("wizardNext").disabled = true;
-    const result = await apiRequest("/api/setup/complete", {
+  const submit = () =>
+    apiRequest("/api/setup/complete", {
       method: "POST",
       body: JSON.stringify(payload)
     });
+
+  try {
+    document.getElementById("wizardNext").disabled = true;
+    let result;
+    try {
+      result = await submit();
+    } catch (error) {
+      // The server refuses an allowed-UI-CIDR list that would 403 this browser
+      // right after setup; let the operator either fix the list or opt in.
+      if (!/lock you out/.test(error.message)) throw error;
+      const confirmed = await openAppDialog({
+        title: "Allowed UI CIDRs block your own address",
+        body: `${error.message} Finish setup anyway? You would need host access to reach the app afterwards.`,
+        confirmLabel: "Finish and lock me out",
+        danger: true
+      });
+      if (confirmed === null) return;
+      payload.confirm_lockout = true;
+      result = await submit();
+    }
     showToast(`Setup saved for ${result.user.username}.`);
     // Setup created the admin and a session cookie — treat as signed in.
     onAuthenticated(result.user);
@@ -6573,6 +6596,48 @@ async function saveClusterBaseDomain() {
   }
 }
 
+async function saveUiCidrs() {
+  if (!currentUser || currentUser.role !== "admin") {
+    showToast("Only admins can change the UI allowlist.");
+    return;
+  }
+  const input = document.getElementById("settingsUiCidrsInput");
+  if (!input) return;
+  const cidrs = splitList(input.value);
+  const persist = async (confirmLockout) => {
+    const result = await apiRequest("/api/security/ui-cidrs", {
+      method: "PUT",
+      body: JSON.stringify({ allowed_ui_cidrs: cidrs, confirm_lockout: confirmLockout })
+    });
+    const saved = result.allowed_ui_cidrs || [];
+    input.value = saved.join(", ");
+    document.getElementById("settingsUiCidrs").textContent = saved.join(", ") || "local access";
+    showToast(saved.length ? "UI allowlist saved" : "UI allowlist cleared (open to the security group)");
+  };
+  try {
+    await persist(false);
+  } catch (error) {
+    // The server refuses a list that excludes the caller's own address unless
+    // explicitly confirmed; surface that as a real decision, not a dead end.
+    if (!/lock you out/.test(error.message)) {
+      showToast(error.message, { type: "error" });
+      return;
+    }
+    const confirmed = await openAppDialog({
+      title: "This allowlist blocks your own address",
+      body: `${error.message} Save anyway? You would need host access to undo it.`,
+      confirmLabel: "Save and lock me out",
+      danger: true
+    });
+    if (confirmed === null) return;
+    try {
+      await persist(true);
+    } catch (retryError) {
+      showToast(retryError.message, { type: "error" });
+    }
+  }
+}
+
 async function persistInstanceTypes(instanceTypes, successMessage) {
   await apiRequest("/api/instance-types", {
     method: "PUT",
@@ -6769,6 +6834,8 @@ function wireSettings() {
 
   const saveBaseDomain = document.getElementById("saveBaseDomainButton");
   if (saveBaseDomain) saveBaseDomain.addEventListener("click", saveClusterBaseDomain);
+  const saveUiCidrsButton = document.getElementById("saveUiCidrsButton");
+  if (saveUiCidrsButton) saveUiCidrsButton.addEventListener("click", saveUiCidrs);
   const baseDomainInput = document.getElementById("settingsBaseDomain");
   if (baseDomainInput) {
     baseDomainInput.addEventListener("keydown", (event) => {

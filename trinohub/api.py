@@ -57,6 +57,14 @@ class SetupCompleteRequest(PayloadModel):
     node_instance_profile: str = "TrinoHubNodeRole"
     allowed_ui_cidrs: list[str] | str = Field(default_factory=list)
     allowed_instance_types: list[str] = Field(default_factory=list)
+    # Explicit opt-in to an allowed_ui_cidrs list that excludes the caller's
+    # own address (which would otherwise 403 them on the next request).
+    confirm_lockout: bool = False
+
+
+class AllowedUiCidrsRequest(PayloadModel):
+    allowed_ui_cidrs: list[str] | str = Field(default_factory=list)
+    confirm_lockout: bool = False
 
 
 class AllowedInstanceTypesRequest(PayloadModel):
@@ -477,8 +485,12 @@ def create_app(
         return control.setup_status(query)
 
     @api.post("/api/setup/complete", status_code=201, tags=["setup"])
-    def complete_setup(payload: SetupCompleteRequest, response: Response) -> dict[str, Any]:
-        result, token = control.complete_setup(payload.payload())
+    def complete_setup(payload: SetupCompleteRequest, request: Request, response: Response) -> dict[str, Any]:
+        result, token = control.complete_setup(
+            payload.payload(),
+            remote_addr=request.client.host if request.client else "",
+            forwarded_for=request.headers.get("x-forwarded-for", ""),
+        )
         set_session_cookie(response, token)
         return result
 
@@ -539,6 +551,25 @@ def create_app(
         actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
     ) -> dict[str, Any]:
         return control.set_session_hours(payload.payload(), actor)
+
+    @api.get("/api/security/ui-cidrs", tags=["settings"])
+    def get_ui_cidr_settings(
+        _: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.allowed_ui_cidrs_settings()
+
+    @api.put("/api/security/ui-cidrs", tags=["settings"])
+    def put_ui_cidr_settings(
+        payload: AllowedUiCidrsRequest,
+        request: Request,
+        actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.set_allowed_ui_cidrs(
+            payload.payload(),
+            actor,
+            remote_addr=request.client.host if request.client else "",
+            forwarded_for=request.headers.get("x-forwarded-for", ""),
+        )
 
     @api.post("/api/auth/revoke-sessions", tags=["auth"])
     def revoke_sessions(response: Response, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
