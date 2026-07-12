@@ -52,6 +52,12 @@ nodes fetch signed, per-cluster bootstrap config over the private network.
 - **Catalogs** — built-in `system`, `tpch`, `tpcds`, plus **S3 + AWS Glue (Iceberg)** data
   sources configured by warehouse location, region, schema, and read/write intent. Worker IAM
   roles grant S3/Glue access — **TrinoHub never stores S3 access keys.**
+- **Accelerated clusters (object-store caching)** — optional warm cache for S3-backed catalogs
+  (Hive, Iceberg, Delta Lake) built on Trino's file system cache: nodes keep hot data pages on
+  local NVMe instance-store SSDs and the scheduler routes work to the nodes that already hold
+  the file, so repeated scans read from local disk instead of S3. Toggle **Accelerated** at
+  cluster create with an NVMe instance type (`i4i` / `r6id` / `i3en`) — see
+  [`docs/accelerated-clusters.md`](docs/accelerated-clusters.md).
 - **SQL editor** — schema browser, cluster/catalog/schema selectors, live status polling,
   tabular results, error display, and CSV export. Browser results cap at 1,000 rows / 10 MB;
   CSV export streams a larger capped buffer.
@@ -207,6 +213,7 @@ FastAPI route tests if dependencies are missing):
 - [`docs/getting-started.md`](docs/getting-started.md) — getting started with TrinoHub.
 - [`docs/first-run-setup.md`](docs/first-run-setup.md) — first-run setup & AWS IAM validation.
 - [`docs/managing-clusters.md`](docs/managing-clusters.md) — create, operate, and tune clusters.
+- [`docs/accelerated-clusters.md`](docs/accelerated-clusters.md) — object-store caching on NVMe for S3 / Iceberg / Delta catalogs, and when it pays off.
 - [`docs/settings-and-security.md`](docs/settings-and-security.md) — settings and the security model.
 - [`deploy/aws/README.md`](deploy/aws/README.md) — **deploy on AWS with the CloudFormation stack** (recommended install).
 - [`deploy/README.md`](deploy/README.md) — service, nginx, IAM, and AMI deployment notes.
