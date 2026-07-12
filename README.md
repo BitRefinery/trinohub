@@ -11,6 +11,8 @@ all from one box, with no static AWS credentials and a Trino-aware autoscaler.
 
 <sub>MANAGED TRINO CLUSTERS · FastAPI + boto3 + SQLite · managed-platform workflow, original implementation</sub>
 
+**[trinohub.org](https://trinohub.org)** · [GitHub](https://github.com/BitRefinery/trinohub)
+
 </div>
 
 ![TrinoHub clusters view](docs/images/02-clusters.png)
