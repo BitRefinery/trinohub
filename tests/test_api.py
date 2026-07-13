@@ -227,6 +227,34 @@ class FastApiRouteTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("allowed UI CIDR", body["error"])
 
+    def test_result_cache_settings_routes(self):
+        # Settings privilege required: unauthenticated callers get a 401.
+        status, _, _ = self.client.request("PUT", "/api/query-cache", {"result_cache_ttl_minutes": 30})
+        self.assertEqual(status, 401)
+
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/setup/complete",
+            {"username": "admin", "password": "correct-horse-password", "node_instance_profile": "TrinoHubNodeRole"},
+        )
+        self.assertEqual(status, 201)
+
+        status, _, body = self.client.request("GET", "/api/query-cache")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"result_cache_ttl_minutes": 10})
+
+        status, _, body = self.client.request("PUT", "/api/query-cache", {"result_cache_ttl_minutes": 30})
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"result_cache_ttl_minutes": 30})
+
+        status, _, body = self.client.request("GET", "/api/query-cache")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"result_cache_ttl_minutes": 30})
+
+        status, _, body = self.client.request("PUT", "/api/query-cache", {"result_cache_ttl_minutes": -5})
+        self.assertEqual(status, 400)
+        self.assertIn("result_cache_ttl_minutes", body["error"])
+
     def test_preset_tiers_route_requires_auth_and_resolves(self):
         status, _, body = self.client.request("GET", "/api/preset-tiers")
         self.assertEqual(status, 401)

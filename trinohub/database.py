@@ -480,6 +480,14 @@ MIGRATIONS = {
         "download_truncated": "INTEGER NOT NULL DEFAULT 0",
         "result_bytes": "INTEGER NOT NULL DEFAULT 0",
         "pending_cluster_start": "INTEGER NOT NULL DEFAULT 0",
+        # Result cache (issue #1). ``cache_key`` is set on fresh cacheable runs
+        # (sha256 over user/cluster/catalog/schema/normalized SQL); cache-served
+        # runs carry ``cache_hit`` plus a pointer to the source run and the time
+        # its results were produced.
+        "cache_key": "TEXT NOT NULL DEFAULT ''",
+        "cache_hit": "INTEGER NOT NULL DEFAULT 0",
+        "cached_from_query_id": "INTEGER",
+        "result_cached_at": "TEXT NOT NULL DEFAULT ''",
     },
     "query_tabs": {
         "run_mode": "TEXT NOT NULL DEFAULT 'current'",
@@ -507,6 +515,9 @@ MIGRATIONS = {
         # Ask Trino assistant config (the OpenRouter model id operators paste in).
         # Empty object = fall back to ASK_TRINO_MODEL env / built-in default.
         "ask_trino_config_json": "TEXT NOT NULL DEFAULT '{}'",
+        # Result-cache TTL in minutes; NULL falls back to the 10-minute default,
+        # 0 disables serving cached results.
+        "result_cache_ttl_minutes": "INTEGER",
     },
     "users": {
         # Service accounts authenticate only via API tokens, never a password.

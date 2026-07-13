@@ -128,6 +128,10 @@ class SessionSettingsRequest(PayloadModel):
     session_hours: int
 
 
+class ResultCacheSettingsRequest(PayloadModel):
+    result_cache_ttl_minutes: int
+
+
 class ApiTokenCreateRequest(PayloadModel):
     name: str
     user_id: int | None = None
@@ -241,6 +245,8 @@ class QueryRequest(PayloadModel):
     sql: str
     catalog: str = ""
     schema_name: str = Field(default="", alias="schema")
+    # True bypasses the result cache and always executes against the cluster.
+    fresh: bool = False
 
 
 class QueryTabCreateRequest(PayloadModel):
@@ -551,6 +557,19 @@ def create_app(
         actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
     ) -> dict[str, Any]:
         return control.set_session_hours(payload.payload(), actor)
+
+    @api.get("/api/query-cache", tags=["settings"])
+    def get_result_cache_settings(
+        _: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return {"result_cache_ttl_minutes": control.result_cache_ttl_minutes()}
+
+    @api.put("/api/query-cache", tags=["settings"])
+    def put_result_cache_settings(
+        payload: ResultCacheSettingsRequest,
+        actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.set_result_cache_ttl(payload.payload(), actor)
 
     @api.get("/api/security/ui-cidrs", tags=["settings"])
     def get_ui_cidr_settings(

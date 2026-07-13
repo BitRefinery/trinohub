@@ -31,6 +31,14 @@ Settings also holds the identity and automation controls:
 - **API tokens** — long-lived bearer tokens for scripts and BI tools. See
   **Automation & API**.
 
+## Result cache
+
+The **Result cache** panel controls how long identical read-only re-runs are
+served from the stored result set instead of re-executing on the cluster
+(default **10 minutes**, maximum 24 hours, 0 disables). Cached results are
+point-in-time snapshots, scoped per user, and never exceed the normal result
+caps. See **Running queries → Cached results**.
+
 ## Notifications
 
 The **Notifications** panel sends a JSON webhook (Slack-compatible) when

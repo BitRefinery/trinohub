@@ -53,10 +53,29 @@ The results card has three tabs:
 > comes first. When a result is capped you'll see a notice. To get more rows,
 > export to CSV.
 
+## Cached results
+
+Re-running an identical read-only query (same cluster, catalog, schema, and
+SQL — ignoring whitespace, comments, and keyword case) within the result-cache
+window serves the stored result instantly instead of contacting the cluster. A
+cache hit even skips resuming an auto-suspended cluster.
+
+When a result comes from the cache the results card shows a
+**Cached — ran N minutes ago** badge, and the run is marked **Cached** in query
+history. Cached results are point-in-time snapshots; click **Run fresh** to
+bypass the cache and re-execute.
+
+Cache entries are per user — one user's cached results are never served to
+another. Admins set the cache window (default **10 minutes**) in
+**Settings → Result cache**; 0 disables it. Results expire after the window and
+nothing larger than the normal result caps is ever stored.
+
 ## Exporting to CSV
 
 Click **CSV** to download the result. CSV export streams a larger capped buffer
 of **10,000 rows or 50 MB**. Use **Run CSV** to run and download in one step.
+CSV export of a cached run reuses the stored buffer — it never re-executes the
+query.
 
 ## Saving, sharing, and reusing queries
 
