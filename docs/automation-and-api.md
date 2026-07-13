@@ -43,6 +43,10 @@ Three tools are exposed:
 write or DDL statement is rejected before it reaches Trino. An MCP client can
 read your data but never modify it.
 
+Identical re-runs inside the result-cache window may be served from the stored
+result set; the response then carries `cached: true` and `result_cached_at`.
+Pass `fresh: true` to force re-execution — useful when polling for change.
+
 To connect, point your MCP host at `https://<your-trinohub-host>/mcp` with an
 `Authorization: Bearer` header carrying an API token.
 

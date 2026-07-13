@@ -2763,7 +2763,12 @@ async function loadResultCacheSettings() {
 }
 
 async function saveResultCacheTtl() {
-  const minutes = Number(document.getElementById("cacheTtlInput").value);
+  const raw = document.getElementById("cacheTtlInput").value.trim();
+  const minutes = Number(raw);
+  if (!raw || !Number.isInteger(minutes) || minutes < 0) {
+    showToast("Enter the cache lifetime as a whole number of minutes (0 disables).", { type: "error" });
+    return;
+  }
   try {
     await apiRequest("/api/query-cache", {
       method: "PUT",

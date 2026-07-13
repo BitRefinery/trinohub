@@ -70,6 +70,16 @@ another. Admins set the cache window (default **10 minutes**) in
 **Settings → Result cache**; 0 disables it. Results expire after the window and
 nothing larger than the normal result caps is ever stored.
 
+The cache steps aside whenever freshness or access could be in question:
+
+- Running a write statement invalidates your own cached entries on that
+  cluster, so a follow-up SELECT re-executes.
+- Admin changes to roles, policies, tags, users, catalogs, or clusters flush
+  the whole cache.
+- A disabled, failed, or manually suspended cluster never serves cached
+  results — only Running and auto-suspended clusters do.
+- Scheduled jobs always execute for real; they never consume the cache.
+
 ## Exporting to CSV
 
 Click **CSV** to download the result. CSV export streams a larger capped buffer

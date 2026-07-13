@@ -1251,7 +1251,9 @@ def create_app(
         {
             "name": "run_query",
             "description": "Run one read-only SELECT statement on a cluster and return rows "
-            "(display-capped). Any write or DDL statement is rejected.",
+            "(display-capped). Any write or DDL statement is rejected. Identical re-runs "
+            "within the result-cache window may be served from cache (cached=true in the "
+            "response); pass fresh=true to force re-execution.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1259,6 +1261,7 @@ def create_app(
                     "sql": {"type": "string"},
                     "catalog": {"type": "string"},
                     "schema": {"type": "string"},
+                    "fresh": {"type": "boolean"},
                 },
                 "required": ["cluster_id", "sql"],
             },

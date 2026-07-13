@@ -580,6 +580,14 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         for name, definition in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    # Indexes on migration-added columns must be created after the columns
+    # exist, so they live here rather than in SCHEMA. The result-cache lookup
+    # probes by (cache_key, user_id) ordered by recency; without the index it
+    # would scan every stored result blob on each query submission.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_query_runs_cache_key"
+        " ON query_runs (cache_key, user_id, updated_at)"
+    )
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
