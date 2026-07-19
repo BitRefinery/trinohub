@@ -40,7 +40,7 @@ body:
     attributes:
       label: Version / commit
       description: Output of `git rev-parse --short HEAD` or the release tag you installed.
-      placeholder: "e.g. v0.1.0 or d0e9522"
+      placeholder: "e.g. v0.2.0 or d0e9522"
     validations:
       required: true
   - type: dropdown

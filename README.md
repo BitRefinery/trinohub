@@ -225,6 +225,7 @@ FastAPI route tests if dependencies are missing):
 - [`deploy/aws/README.md`](deploy/aws/README.md) — **deploy on AWS with the CloudFormation stack** (recommended install).
 - [`deploy/README.md`](deploy/README.md) — service, nginx, IAM, and AMI deployment notes.
 - [`deploy/VALIDATION.md`](deploy/VALIDATION.md) — clean-account validation gate (launches billable AWS resources; requires explicit billing confirmation).
+- [`docs/releasing.md`](docs/releasing.md) — maintainer release checklist and upgrade procedure.
 
 ---
 

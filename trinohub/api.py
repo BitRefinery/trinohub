@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import __version__
 from .database import loads, row_to_dict
 from .aws_checks import fetch_published_trino_versions
 from .server import (
@@ -382,7 +383,7 @@ def create_app(
 
     api = FastAPI(
         title="TrinoHub API",
-        version="0.1.0",
+        version=__version__,
         description="Control-plane API for TrinoHub cluster, catalog, user, setup, and query workflows.",
     )
     api.state.trinohub = control

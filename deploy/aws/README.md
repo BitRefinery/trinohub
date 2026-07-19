@@ -77,11 +77,24 @@ If the page doesn't load yet, wait and retry.)
 
 ## Updating
 
-Push a new tag/commit, then update the stack with a new `GitRef`, or SSM in and:
+`GitRef` selects the code cloned when CloudFormation creates the control-plane
+instance. For reproducible installs, set it to a release tag. Changing that
+parameter on an existing stack does not rerun the instance's first-boot script,
+so upgrade an existing control plane through SSM Session Manager:
 
 ```bash
-cd /opt/trinohub/app && sudo -u trinohub git pull && sudo systemctl restart trinohub
+cd /opt/trinohub/app
+sudo -u trinohub git fetch --tags origin
+sudo -u trinohub git checkout v0.2.0
+sudo -u trinohub .venv/bin/pip install -r requirements.txt
+sudo systemctl restart trinohub
+sudo systemctl --no-pager --full status trinohub
 ```
+
+Replace `v0.2.0` with the release being installed. This preserves the SQLite
+database under `.trinohub/`. Back up that directory before an upgrade and verify
+the UI and `GET /api/health` afterward. New or replacement stack instances can
+select the same tag with `--parameter-overrides GitRef=v0.2.0 ...`.
 
 ## Teardown
 

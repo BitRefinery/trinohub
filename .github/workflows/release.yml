@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Verify tag matches package version
+        run: test "v$(python -c 'from trinohub import __version__; print(__version__)')" = "$GITHUB_REF_NAME"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit and API route tests
+        run: python -m unittest discover -s tests -v
+
+      - name: End-to-end workflow suite
+        run: python testing/run_e2e.py
+
+      - name: Core Python syntax
+        run: python -m py_compile trinohub/api.py trinohub/server.py trinohub/aws_checks.py trinohub/database.py
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "TrinoHub $GITHUB_REF_NAME"
