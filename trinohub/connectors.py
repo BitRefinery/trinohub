@@ -6,12 +6,11 @@ credential all live here as data, instead of being scattered across the
 create/update/check guards in ``server.py`` and the node-config renderer in
 ``aws_checks.py``.
 
-The S3/Glue family (``s3_glue`` Iceberg, ``delta_glue`` Delta Lake, ``hive_glue``
-Hive) shares the ``kind="s3_glue"`` machinery: each authenticates through the
-node IAM role, needs no stored credential, and flows through one hand-written
-normalizer (``Server.normalize_glue_catalog_config``) and one renderer
-(``AwsInspector.glue_catalog_properties``), both parameterized by the
-descriptor's ``connector_name``/``table_format``; these carry no ``url_pattern``.
+Glue-backed lakehouse catalogs share the ``kind="s3_glue"`` machinery and flow
+through one normalizer (``Server.normalize_glue_catalog_config``) and renderer
+(``AwsInspector.glue_catalog_properties``). S3 variants authenticate through the
+node IAM role; GCS and ADLS Iceberg variants use a stored cross-cloud credential.
+The descriptor selects ``connector_name``, ``table_format``, and ``storage_kind``.
 Every JDBC type shares a single generic normalizer
 (``Server.normalize_jdbc_catalog_config``) and a single generic ``.properties``
 renderer (``AwsInspector.jdbc_catalog_properties``), both parameterized by the
@@ -47,7 +46,11 @@ class ConnectorType:
     credential_kind: str = "password"
     icon: str = "database"  # UI card icon hint
     connector_name: str | None = None  # Trino connector.name; None for non-JDBC
-    table_format: str | None = None  # S3/Glue family only: ICEBERG | DELTA | HIVE
+    table_format: str | None = None  # Glue-backed lakehouse: ICEBERG | DELTA | HIVE
+    # Object storage used by Glue-backed lakehouse catalogs. GCS and ADLS use
+    # the same Iceberg + Glue metadata path as S3, but require a stored secret
+    # and different native-file-system properties at render time.
+    storage_kind: str | None = None  # s3 | gcs | azure
     url_pattern: re.Pattern[str] | None = None  # JDBC URL; host captured as group 1
     url_help: str | None = None  # human-readable URL example for 400 messages
     requires_driver: bool = False  # driver JAR not bundled; operator must upload one
@@ -95,6 +98,29 @@ REGISTRY: dict[str, ConnectorType] = {
         icon="cloud",
         connector_name="iceberg",
         table_format="ICEBERG",
+        storage_kind="s3",
+    ),
+    "gcs_glue": ConnectorType(
+        type="gcs_glue",
+        label="Google Cloud Storage + Glue (Iceberg)",
+        requires_secret=True,
+        kind="s3_glue",
+        icon="cloud",
+        connector_name="iceberg",
+        table_format="ICEBERG",
+        storage_kind="gcs",
+        credential_kind="gcp_service_account",
+    ),
+    "adls_glue": ConnectorType(
+        type="adls_glue",
+        label="Azure Data Lake + Glue (Iceberg)",
+        requires_secret=True,
+        kind="s3_glue",
+        icon="cloud",
+        connector_name="iceberg",
+        table_format="ICEBERG",
+        storage_kind="azure",
+        credential_kind="azure_storage_key",
     ),
     "delta_glue": ConnectorType(
         type="delta_glue",
@@ -104,6 +130,7 @@ REGISTRY: dict[str, ConnectorType] = {
         icon="cloud",
         connector_name="delta_lake",
         table_format="DELTA",
+        storage_kind="s3",
     ),
     "hive_glue": ConnectorType(
         type="hive_glue",
@@ -113,6 +140,7 @@ REGISTRY: dict[str, ConnectorType] = {
         icon="cloud",
         connector_name="hive",
         table_format="HIVE",
+        storage_kind="s3",
     ),
     "hudi_glue": ConnectorType(
         type="hudi_glue",
@@ -122,6 +150,7 @@ REGISTRY: dict[str, ConnectorType] = {
         icon="cloud",
         connector_name="hudi",
         table_format="HUDI",
+        storage_kind="s3",
     ),
     "postgresql": ConnectorType(
         type="postgresql",
@@ -338,6 +367,8 @@ _UI_GROUP_BY_KIND = {
 # Suggested catalog name when starting a new catalog of each type.
 _UI_DEFAULT_NAME = {
     "s3_glue": "analytics_s3",
+    "gcs_glue": "analytics_gcs",
+    "adls_glue": "analytics_adls",
     "delta_glue": "analytics_delta",
     "hive_glue": "analytics_hive",
     "hudi_glue": "analytics_hudi",
@@ -370,14 +401,26 @@ def _form_fields(spec: ConnectorType) -> list[dict[str, object]]:
     """Non-secret config fields the form should render for ``spec``."""
     kind = spec.kind
     if kind == "s3_glue":
+        storage_kind = spec.storage_kind or "s3"
+        warehouse = {
+            "s3": ("S3 warehouse location", "s3://company-lakehouse/warehouse/"),
+            "gcs": ("GCS warehouse location", "gs://company-lakehouse/warehouse/"),
+            "azure": (
+                "ADLS warehouse location",
+                "abfss://warehouse@companylake.dfs.core.windows.net/iceberg/",
+            ),
+        }[storage_kind]
         fields: list[dict[str, object]] = [
             {"name": "glue_region", "label": "Glue region", "input": "region", "required": True, "default": "us-east-2"},
-            {"name": "warehouse", "label": "S3 warehouse location", "input": "text", "required": True,
-             "placeholder": "s3://company-lakehouse/warehouse/", "full_width": True},
+            {"name": "warehouse", "label": warehouse[0], "input": "text", "required": True,
+             "placeholder": warehouse[1], "full_width": True},
             {"name": "default_schema", "label": "Default schema", "input": "text", "default": "default"},
             {"name": "table_format", "label": "Default table format", "input": "readonly",
              "value": _TABLE_FORMAT_LABEL.get(spec.table_format or "", spec.table_format or "")},
         ]
+        if storage_kind == "gcs":
+            fields.insert(2, {"name": "project_id", "label": "GCP project ID", "input": "text",
+                              "required": True, "placeholder": "my-analytics-project"})
         # Hudi is query-only in Trino, so read/write access mode does not apply.
         if spec.connector_name != "hudi":
             fields.append({"name": "access_mode", "label": "Access mode", "input": "select",
@@ -435,6 +478,9 @@ def _credential_field(spec: ConnectorType) -> dict[str, object] | None:
     if spec.requires_secret:
         if spec.credential_kind == "gcp_service_account":
             return {"name": "password", "label": "Service-account JSON key", "input": "textarea",
+                    "required_on_create": True, "full_width": True}
+        if spec.credential_kind == "azure_storage_key":
+            return {"name": "password", "label": "Azure storage account key", "input": "password",
                     "required_on_create": True, "full_width": True}
         return {"name": "password", "label": "Connection password", "input": "password", "required_on_create": True}
     if spec.optional_secret:

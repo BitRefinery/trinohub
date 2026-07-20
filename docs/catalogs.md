@@ -13,13 +13,17 @@ These are enabled by default and need no configuration:
 - **tpch** — the TPC-H benchmark dataset (great for trying things out).
 - **tpcds** — the TPC-DS decision-support dataset.
 
-## Object storage — S3 + AWS Glue
+## Object storage — AWS Glue with S3, GCS, or ADLS
 
-Query lakehouse tables on S3 through the AWS Glue Data Catalog, authenticated by
-the cluster's node IAM role. Three table formats are available as separate
-connectors in the picker, all sharing the same form:
+Query lakehouse tables through the AWS Glue Data Catalog. S3 access uses the
+cluster's node IAM role; cross-cloud Google Cloud Storage (GCS) and Azure Data
+Lake Storage Gen2 (ADLS) credentials are kept in AWS Secrets Manager.
 
 - **S3 + Glue (Iceberg)** — Apache Iceberg tables.
+- **Google Cloud Storage + Glue (Iceberg)** — Iceberg data under a `gs://`
+  warehouse, authenticated with a GCP service-account JSON key.
+- **Azure Data Lake + Glue (Iceberg)** — Iceberg data under an `abfss://`
+  warehouse, authenticated with an Azure storage account key.
 - **Delta Lake (S3 + Glue)** — Delta Lake tables.
 - **Hive (S3 + Glue)** — plain Parquet/ORC/text tables via the Hive connector.
 - **Hudi (S3 + Glue)** — Apache Hudi tables. Query-only (Trino reads Hudi but
@@ -29,12 +33,16 @@ Provide:
 
 - **Name** — the catalog name analysts will use.
 - **Glue region** — the AWS region of your Glue Data Catalog.
-- **S3 warehouse** — the S3 location for table data.
+- **Warehouse** — an `s3://`, `gs://`, or
+  `abfss://container@account.dfs.core.windows.net/` location matching the
+  connector. GCS also requires its project ID.
 - **Default schema** and **access mode** (read-only or read/write). The **table
   format** is fixed by the connector you picked.
 
 Worker node IAM roles grant the S3 and Glue access — **TrinoHub never stores S3
-access keys.**
+access keys.** GCS and ADLS credentials are stored only as opaque secret
+references in the catalog record and are resolved over the signed node-config
+channel at cluster boot.
 
 ## Relational databases (JDBC)
 

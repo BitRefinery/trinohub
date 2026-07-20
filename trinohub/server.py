@@ -133,6 +133,11 @@ BUILT_IN_CATALOG_NAMES = {name for name, _, _ in BUILT_IN_CATALOGS}
 CATALOG_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]{1,62}")
 AWS_REGION_PATTERN = re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d")
 S3_WAREHOUSE_PATTERN = re.compile(r"s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](?:/[^\s]*)?")
+GCS_WAREHOUSE_PATTERN = re.compile(r"gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9](?:/[^\s]*)?")
+ADLS_WAREHOUSE_PATTERN = re.compile(
+    r"abfss://[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?@"
+    r"[a-z0-9]{3,24}\.dfs\.core\.windows\.net(?:/[^\s]*)?"
+)
 SCHEMA_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 JDBC_USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,127}")
 # Hostname or IP literal for non-URL connectors (e.g. Elasticsearch host field).
@@ -6208,10 +6213,15 @@ class TrinoHubApp:
         spec = REGISTRY.get(catalog_type)
         credential_kind = spec.credential_kind if spec else "password"
         if not isinstance(password, str) or not password:
-            noun = "service-account key" if credential_kind == "gcp_service_account" else "password"
+            noun = {
+                "gcp_service_account": "service-account key",
+                "azure_storage_key": "Azure storage account key",
+            }.get(credential_kind, "password")
             raise ApiError(400, f"{catalog_type} catalogs require a non-empty {noun}.")
         if credential_kind == "gcp_service_account":
             self.validate_gcp_service_account_key(password)
+        elif credential_kind == "azure_storage_key" and ("\r" in password or "\n" in password):
+            raise ApiError(400, "Azure storage account key must be a single-line value.")
         try:
             return self.secret_store.put(name, password)
         except SecretStoreError as exc:
@@ -6223,9 +6233,9 @@ class TrinoHubApp:
         try:
             doc = json.loads(raw)
         except (ValueError, TypeError):
-            raise ApiError(400, "BigQuery credentials must be the service-account JSON key.") from None
+            raise ApiError(400, "GCP credentials must be the service-account JSON key.") from None
         if not isinstance(doc, dict) or doc.get("type") != "service_account":
-            raise ApiError(400, 'BigQuery credentials must be a service-account key ("type": "service_account").')
+            raise ApiError(400, 'GCP credentials must be a service-account key ("type": "service_account").')
         for field in ("private_key", "client_email", "project_id"):
             if not doc.get(field):
                 raise ApiError(400, f"Service-account key is missing required field '{field}'.")
@@ -6394,18 +6404,25 @@ class TrinoHubApp:
         return config
 
     def normalize_glue_catalog_config(self, spec: ConnectorType, raw_config: Any) -> dict[str, Any]:
-        # Shared validator for the S3/Glue family (Iceberg / Delta Lake / Hive).
-        # They differ only in the rendered connector.name + security key; the config
-        # surface (Glue region, S3 warehouse, access mode) is identical. The table
-        # format is fixed by the catalog type, not accepted from the client.
+        # Shared validator for Glue-backed lakehouse catalogs. The S3 family and
+        # the cross-cloud GCS/ADLS Iceberg variants share Glue metadata, while the
+        # warehouse URI and native filesystem authentication differ by descriptor.
         if not isinstance(raw_config, dict):
             raise ApiError(400, "catalog config must be an object.")
         for key in raw_config:
             lowered = str(key).lower()
-            if "secret" in lowered or "access_key" in lowered or "access-key" in lowered:
-                raise ApiError(400, "Do not store AWS access keys or secrets in TrinoHub catalog configuration.")
+            if any(
+                marker in lowered
+                for marker in ("secret", "password", "credential", "private_key", "access_key", "access-key", "sas")
+            ):
+                raise ApiError(
+                    400,
+                    "Do not store AWS access keys, secrets, or other object-storage credentials "
+                    "in catalog config; use the credential field.",
+                )
 
         glue_region = str(raw_config.get("glue_region", "")).strip()
+        storage_kind = spec.storage_kind or "s3"
         s3_region = str(raw_config.get("s3_region") or glue_region).strip()
         warehouse = str(raw_config.get("warehouse", "")).strip()
         default_schema = str(raw_config.get("default_schema") or "default").strip()
@@ -6414,10 +6431,16 @@ class TrinoHubApp:
 
         if not AWS_REGION_PATTERN.fullmatch(glue_region):
             raise ApiError(400, "glue_region must be an AWS region such as us-east-2.")
-        if not AWS_REGION_PATTERN.fullmatch(s3_region):
+        if storage_kind == "s3" and not AWS_REGION_PATTERN.fullmatch(s3_region):
             raise ApiError(400, "s3_region must be an AWS region such as us-east-2.")
-        if not S3_WAREHOUSE_PATTERN.fullmatch(warehouse):
-            raise ApiError(400, "warehouse must be an s3:// bucket path.")
+        warehouse_patterns = {
+            "s3": (S3_WAREHOUSE_PATTERN, "an s3:// bucket path"),
+            "gcs": (GCS_WAREHOUSE_PATTERN, "a gs:// bucket path"),
+            "azure": (ADLS_WAREHOUSE_PATTERN, "an abfss:// container@account.dfs.core.windows.net path"),
+        }
+        pattern, warehouse_help = warehouse_patterns[storage_kind]
+        if not pattern.fullmatch(warehouse):
+            raise ApiError(400, f"warehouse must be {warehouse_help}.")
         if not warehouse.endswith("/"):
             warehouse = f"{warehouse}/"
         if not SCHEMA_NAME_PATTERN.fullmatch(default_schema):
@@ -6427,15 +6450,22 @@ class TrinoHubApp:
         if access_mode not in {"read_write", "read_only"}:
             raise ApiError(400, "access_mode must be read_write or read_only.")
 
-        return {
+        config = {
             "glue_region": glue_region,
-            "s3_region": s3_region,
             "warehouse": warehouse,
             "default_schema": default_schema,
             "table_format": spec.table_format,
             "file_format": file_format,
             "access_mode": access_mode,
         }
+        if storage_kind == "s3":
+            config["s3_region"] = s3_region
+        elif storage_kind == "gcs":
+            project_id = str(raw_config.get("project_id") or "").strip()
+            if not GCP_PROJECT_PATTERN.fullmatch(project_id):
+                raise ApiError(400, "project_id must be a valid GCP project ID (e.g. my-analytics-project).")
+            config["project_id"] = project_id
+        return config
 
     def require_known_catalogs(self, conn: sqlite3.Connection, catalog_names: list[str]) -> None:
         configured = {row["name"]: row for row in self.catalog_rows_by_name(conn, catalog_names).values()}
