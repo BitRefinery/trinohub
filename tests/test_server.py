@@ -1114,6 +1114,93 @@ class ServerModelTests(unittest.TestCase):
         self.assertEqual(result["catalog"]["config"]["file_format"], "PARQUET")
         self.assertEqual(result["catalog"]["config"]["table_format"], "ICEBERG")
 
+    def test_create_gcs_glue_catalog_stores_only_service_account_reference(self):
+        self.app.secret_store = FakeSecretStore()
+        key = json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "my-analytics-project",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nMIIsecret\n-----END PRIVATE KEY-----\n",
+                "client_email": "trino@my-analytics-project.iam.gserviceaccount.com",
+            },
+            indent=2,
+        )
+        created = self.app.create_catalog(
+            {
+                "name": "analytics_gcs",
+                "type": "gcs_glue",
+                "config": {
+                    "glue_region": "us-east-2",
+                    "warehouse": "gs://company-lakehouse/warehouse",
+                    "project_id": "my-analytics-project",
+                },
+                "password": key,
+            }
+        )["catalog"]
+
+        self.assertEqual(created["config"]["warehouse"], "gs://company-lakehouse/warehouse/")
+        self.assertEqual(created["config"]["project_id"], "my-analytics-project")
+        self.assertIn("password_secret_ref", created["config"])
+        with self.app.conn() as conn:
+            stored = conn.execute("SELECT config_json FROM catalogs WHERE name = 'analytics_gcs'").fetchone()[0]
+        self.assertNotIn("PRIVATE KEY", stored)
+        self.assertNotIn("MIIsecret", stored)
+
+    def test_create_adls_glue_catalog_stores_only_access_key_reference(self):
+        self.app.secret_store = FakeSecretStore()
+        created = self.app.create_catalog(
+            {
+                "name": "analytics_adls",
+                "type": "adls_glue",
+                "config": {
+                    "glue_region": "us-east-2",
+                    "warehouse": "abfss://warehouse@companylake.dfs.core.windows.net/iceberg",
+                },
+                "password": "base64-azure-storage-key",
+            }
+        )["catalog"]
+
+        self.assertEqual(
+            created["config"]["warehouse"],
+            "abfss://warehouse@companylake.dfs.core.windows.net/iceberg/",
+        )
+        self.assertIn("password_secret_ref", created["config"])
+        self.assertNotIn("base64-azure-storage-key", json.dumps(self.app.list_catalogs()))
+        with self.assertRaises(ApiError) as context:
+            self.app.create_catalog(
+                {
+                    "name": "analytics_adls_injected",
+                    "type": "adls_glue",
+                    "config": {
+                        "glue_region": "us-east-2",
+                        "warehouse": "abfss://warehouse@companylake.dfs.core.windows.net/iceberg",
+                    },
+                    "password": "key\nmalicious.property=true",
+                }
+            )
+        self.assertIn("single-line", context.exception.message)
+
+    def test_cross_cloud_glue_catalogs_reject_wrong_warehouse_scheme(self):
+        self.app.secret_store = FakeSecretStore()
+        key = json.dumps(
+            {"type": "service_account", "project_id": "p", "private_key": "k", "client_email": "e"}
+        )
+        cases = (
+            ("gcs_glue", "s3://wrong/warehouse", {"project_id": "my-analytics-project"}, key),
+            ("adls_glue", "gs://wrong/warehouse", {}, "azure-key"),
+        )
+        for catalog_type, warehouse, extra, credential in cases:
+            with self.subTest(catalog_type=catalog_type), self.assertRaises(ApiError) as context:
+                self.app.create_catalog(
+                    {
+                        "name": f"bad_{catalog_type}",
+                        "type": catalog_type,
+                        "config": {"glue_region": "us-east-2", "warehouse": warehouse, **extra},
+                        "password": credential,
+                    }
+                )
+            self.assertEqual(context.exception.status, 400)
+
     def test_create_delta_and_hive_glue_catalogs_derive_table_format(self):
         # Delta Lake, Hive, and Hudi reuse the S3/Glue form and IAM auth (no secret);
         # the table format is fixed by the catalog type, not accepted from the client.
@@ -1446,7 +1533,7 @@ class ServerModelTests(unittest.TestCase):
             user = dict(conn.execute("SELECT * FROM users WHERE username = 'admin'").fetchone())
         cluster = app.create_cluster(
             {
-                "name": f"{payload_type}-cluster",
+                "name": f"{payload_type.replace('_', '-')}-cluster",
                 "instance_type": "r7i.2xlarge",
                 "worker_mode": "fixed",
                 "min_workers": 1,
@@ -1965,6 +2052,16 @@ class ServerModelTests(unittest.TestCase):
         self.assertEqual(table_field["input"], "readonly")
         self.assertEqual(table_field["value"], "Iceberg")
         self.assertIn("access_mode", [f["name"] for f in iceberg["fields"]])
+
+        gcs = by_type["gcs_glue"]
+        self.assertTrue(gcs["requires_secret"])
+        self.assertEqual(gcs["credential_kind"], "gcp_service_account")
+        self.assertIn("project_id", [f["name"] for f in gcs["fields"]])
+        self.assertIn("gs://", next(f for f in gcs["fields"] if f["name"] == "warehouse")["placeholder"])
+
+        adls = by_type["adls_glue"]
+        self.assertEqual(adls["credential_kind"], "azure_storage_key")
+        self.assertIn("abfss://", next(f for f in adls["fields"] if f["name"] == "warehouse")["placeholder"])
 
         # Hudi is query-only: no access-mode field.
         self.assertNotIn("access_mode", [f["name"] for f in by_type["hudi_glue"]["fields"]])
@@ -3788,6 +3885,86 @@ class AwsBootstrapTests(unittest.TestCase):
         self.assertIn("s3.region=us-east-2", script)
         self.assertIn("iceberg.file-format=PARQUET", script)
         self.assertIn("iceberg.security=READ_ONLY", script)
+
+    def test_gcs_glue_catalog_renders_secret_only_in_signed_node_config(self):
+        key = json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "my-analytics-project",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nMIIsecret\n-----END PRIVATE KEY-----\n",
+                "client_email": "trino@my-analytics-project.iam.gserviceaccount.com",
+            },
+            indent=2,
+        )
+        catalog = {
+            "name": "analytics_gcs",
+            "type": "gcs_glue",
+            "enabled": True,
+            "config": {
+                "glue_region": "us-east-2",
+                "warehouse": "gs://company-lakehouse/warehouse/",
+                "project_id": "my-analytics-project",
+                "password_secret_ref": "arn:secret",
+            },
+        }
+        aws = AwsInspector(region="us-east-2")
+        props = aws.catalog_config_files(
+            ["analytics_gcs"], [catalog], secret_resolver=lambda _ref: key
+        )["analytics_gcs"]
+        self.assertIn("connector.name=iceberg", props)
+        self.assertIn("fs.gcs.enabled=true", props)
+        self.assertIn("gcs.auth-type=SERVICE_ACCOUNT", props)
+        self.assertIn("gcs.project-id=my-analytics-project", props)
+        self.assertIn('gcs.json-key={"type":"service_account"', props)
+        self.assertIn("MIIsecret", props)
+        self.assertNotIn("\n  \"type\"", props)
+        with self.assertRaises(RuntimeError):
+            aws.catalog_config_files(["analytics_gcs"], [catalog])
+
+    def test_adls_glue_catalog_renders_access_key_only_in_signed_node_config(self):
+        catalog = {
+            "name": "analytics_adls",
+            "type": "adls_glue",
+            "enabled": True,
+            "config": {
+                "glue_region": "us-east-2",
+                "warehouse": "abfss://warehouse@companylake.dfs.core.windows.net/iceberg/",
+                "password_secret_ref": "arn:secret",
+            },
+        }
+        aws = AwsInspector(region="us-east-2")
+        props = aws.catalog_config_files(
+            ["analytics_adls"], [catalog], secret_resolver=lambda _ref: "base64-azure-storage-key"
+        )["analytics_adls"]
+        self.assertIn("fs.azure.enabled=true", props)
+        self.assertIn("azure.auth-type=ACCESS_KEY", props)
+        self.assertIn("azure.access-key=base64-azure-storage-key", props)
+        with self.assertRaises(RuntimeError):
+            aws.catalog_config_files(["analytics_adls"], [catalog])
+
+    def test_cross_cloud_glue_renderer_uses_legacy_native_prefix_before_481(self):
+        aws = AwsInspector(region="us-east-2")
+        catalog = {
+            "name": "analytics_gcs",
+            "type": "gcs_glue",
+            "enabled": True,
+            "config": {
+                "glue_region": "us-east-2",
+                "warehouse": "gs://company-lakehouse/warehouse/",
+                "project_id": "my-analytics-project",
+                "password_secret_ref": "arn:secret",
+            },
+        }
+        props = aws.catalog_config_files(
+            ["analytics_gcs"],
+            [catalog],
+            secret_resolver=lambda _ref: json.dumps(
+                {"type": "service_account", "project_id": "p", "private_key": "k", "client_email": "e"}
+            ),
+            trino_version="480",
+        )["analytics_gcs"]
+        self.assertIn("fs.native-gcs.enabled=true", props)
+        self.assertNotIn("\nfs.gcs.enabled=true", props)
 
     def test_trino_user_data_configures_delta_and_hive_glue_catalogs(self):
         # Delta Lake and Hive share the S3/Glue IAM path but render a different

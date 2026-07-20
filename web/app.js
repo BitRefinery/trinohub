@@ -837,15 +837,16 @@ function catalogDescription(catalog) {
   return catalog.type;
 }
 
-// S3/Glue-family connectors share one form (Glue region / warehouse / access
-// mode) and IAM auth; they differ only in the Trino connector.name and the
-// stored table_format. Mirrors the kind="s3_glue" descriptors in
-// trinohub/connectors.py.
+// Glue-backed lakehouse connectors share one form (Glue region / warehouse /
+// access mode). S3 uses node IAM; GCS/ADLS add a write-only storage credential.
+// Mirrors the kind="s3_glue" descriptors in trinohub/connectors.py.
 const GLUE_CATALOG_TYPES = {
-  s3_glue: { label: "Iceberg", tableFormat: "ICEBERG", shortLabel: "S3 + Glue Iceberg" },
-  delta_glue: { label: "Delta Lake", tableFormat: "DELTA", shortLabel: "Delta Lake on S3 + Glue" },
-  hive_glue: { label: "Hive", tableFormat: "HIVE", shortLabel: "Hive on S3 + Glue" },
-  hudi_glue: { label: "Hudi", tableFormat: "HUDI", shortLabel: "Hudi on S3 + Glue" }
+  s3_glue: { label: "S3 + Glue · Iceberg", tableFormat: "ICEBERG", storage: "s3", shortLabel: "S3 + Glue Iceberg" },
+  gcs_glue: { label: "GCS + Glue · Iceberg", tableFormat: "ICEBERG", storage: "gcs", shortLabel: "GCS + Glue Iceberg" },
+  adls_glue: { label: "ADLS + Glue · Iceberg", tableFormat: "ICEBERG", storage: "azure", shortLabel: "ADLS + Glue Iceberg" },
+  delta_glue: { label: "Delta Lake", tableFormat: "DELTA", storage: "s3", shortLabel: "Delta Lake on S3 + Glue" },
+  hive_glue: { label: "Hive", tableFormat: "HIVE", storage: "s3", shortLabel: "Hive on S3 + Glue" },
+  hudi_glue: { label: "Hudi", tableFormat: "HUDI", storage: "s3", shortLabel: "Hudi on S3 + Glue" }
 };
 
 function isGlueCatalogType(type) {
@@ -1319,10 +1320,11 @@ function connectorGlyphSvg(key, size, sw) {
 }
 
 // Trino connector.name per catalog type (differs from the type key for the
-// S3/Glue family). Mirrors connector_name in trinohub/connectors.py; shown on
+// Glue-backed lakehouse family). Mirrors connector_name in connectors.py; shown on
 // the editor's live-connection map as `connector.name = <name>`.
 const CONNECTOR_NAME_BY_TYPE = {
-  s3_glue: "iceberg", delta_glue: "delta_lake", hive_glue: "hive", hudi_glue: "hudi",
+  s3_glue: "iceberg", gcs_glue: "iceberg", adls_glue: "iceberg",
+  delta_glue: "delta_lake", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
   snowflake: "snowflake", druid: "druid", mongodb: "mongodb",
@@ -1332,7 +1334,8 @@ const CONNECTOR_NAME_BY_TYPE = {
 };
 
 const CATALOG_GLYPH_BY_TYPE = {
-  s3_glue: "iceberg", delta_glue: "delta", hive_glue: "hive", hudi_glue: "hudi",
+  s3_glue: "iceberg", gcs_glue: "iceberg", adls_glue: "iceberg",
+  delta_glue: "delta", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
   snowflake: "snowflake", druid: "druid", mongodb: "mongodb",
@@ -1396,7 +1399,7 @@ const CATALOG_STATUS_LABELS = { healthy: "Healthy", enabled: "Enabled", disabled
 
 function catalogTypeLabel(catalog) {
   if (catalog.type === "builtin") return "Built-in";
-  if (isGlueCatalogType(catalog.type)) return "S3 + Glue · " + GLUE_CATALOG_TYPES[catalog.type].label;
+  if (isGlueCatalogType(catalog.type)) return GLUE_CATALOG_TYPES[catalog.type].label;
   if (JDBC_CATALOG_TYPES[catalog.type]) return JDBC_CATALOG_TYPES[catalog.type].label;
   if (isSearchCatalogType(catalog.type)) return SEARCH_CATALOG_TYPES[catalog.type].label;
   if (isCassandraCatalogType(catalog.type)) return "Apache Cassandra";
@@ -2996,6 +2999,8 @@ function ensureCatalogRegionOption(region) {
 
 const CATALOG_TYPE_TITLES = {
   s3_glue: "S3 + Glue catalog",
+  gcs_glue: "Google Cloud Storage + Glue catalog",
+  adls_glue: "Azure Data Lake + Glue catalog",
   delta_glue: "Delta Lake catalog",
   hive_glue: "Hive catalog",
   hudi_glue: "Hudi catalog",
@@ -3024,6 +3029,8 @@ const CATALOG_TYPE_TITLES = {
 // Default catalog name suggested when starting a new catalog of each type.
 const CATALOG_TYPE_DEFAULT_NAMES = {
   s3_glue: "analytics_s3",
+  gcs_glue: "analytics_gcs",
+  adls_glue: "analytics_adls",
   delta_glue: "analytics_delta",
   hive_glue: "analytics_hive",
   hudi_glue: "analytics_hudi",
@@ -3053,7 +3060,7 @@ const CATALOG_TYPE_DEFAULT_NAMES = {
 // come from the fetched schema (grouped by its `group` field), so this only
 // carries presentation: ordering and the descriptive blurb.
 const CATALOG_PICKER_GROUP_META = [
-  { title: "Object storage", description: "Query S3 tables through the AWS Glue Data Catalog, authenticated by the cluster IAM role — no stored credentials." },
+  { title: "Object storage", description: "Query S3, Google Cloud Storage, or Azure Data Lake tables through the AWS Glue Data Catalog. Cross-cloud credentials stay in AWS Secrets Manager." },
   { title: "Databases", description: "Connect over JDBC. Credentials are stored in AWS Secrets Manager, never in the catalog config." },
   { title: "Document & search", description: "Host, port, connection user and default schema, with password authentication." },
   { title: "Google Cloud", description: "Cross-cloud sources authenticated by a service-account JSON key stored in AWS Secrets Manager." },
@@ -3200,7 +3207,10 @@ function catalogLiveNodes(catalog) {
   let authSub;
   if (isGlueCatalogType(type)) {
     sourceSub = "Object storage via AWS Glue";
-    authSub = "Authenticated by the cluster node IAM role — no stored credentials.";
+    const storage = GLUE_CATALOG_TYPES[type].storage;
+    authSub = storage === "s3"
+      ? "Authenticated by the cluster node IAM role — no stored credentials."
+      : "Storage credential kept in AWS Secrets Manager and delivered over the signed node channel.";
   } else if (type === "bigquery" || type === "gsheets") {
     sourceSub = "Cross-cloud Google source";
     authSub = "Service-account JSON key stored in AWS Secrets Manager, delivered over the signed node channel.";
@@ -3553,19 +3563,24 @@ function catalogPayloadFromForm() {
   const glue = GLUE_CATALOG_TYPES[type] || GLUE_CATALOG_TYPES.s3_glue;
   const glueType = GLUE_CATALOG_TYPES[type] ? type : "s3_glue";
   const accessMode = fieldValue("access_mode") === "Read only" ? "read_only" : "read_write";
-  return {
+  const config = {
+    glue_region: fieldValue("glue_region"),
+    warehouse: fieldValue("warehouse").trim(),
+    default_schema: fieldValue("default_schema").trim() || "default",
+    table_format: glue.tableFormat,
+    file_format: "PARQUET",
+    access_mode: accessMode
+  };
+  if (glue.storage === "s3") config.s3_region = fieldValue("glue_region");
+  if (glue.storage === "gcs") config.project_id = fieldValue("project_id").trim();
+  const payload = {
     name,
     type: glueType,
-    config: {
-      glue_region: fieldValue("glue_region"),
-      s3_region: fieldValue("glue_region"),
-      warehouse: fieldValue("warehouse").trim(),
-      default_schema: fieldValue("default_schema").trim() || "default",
-      table_format: glue.tableFormat,
-      file_format: "PARQUET",
-      access_mode: accessMode
-    }
+    config
   };
+  const credential = fieldValue("password").trim();
+  if (credential) payload.password = credential;
+  return payload;
 }
 
 // Shared by BigQuery and Google Sheets: an empty key is allowed on edit (keeps
@@ -3686,11 +3701,29 @@ function validateCatalogPayload(payload) {
     }
     return validateServiceAccountKey(payload.password);
   }
-  if (!new RegExp("^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](?:/\\S*)?$").test(payload.config.warehouse)) {
-    return "Warehouse must be an s3:// bucket path.";
+  const storage = GLUE_CATALOG_TYPES[payload.type].storage;
+  const warehousePatterns = {
+    s3: /^s3:\/\/[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](?:\/\S*)?$/,
+    gcs: /^gs:\/\/[a-z0-9][a-z0-9._-]{1,220}[a-z0-9](?:\/\S*)?$/,
+    azure: /^abfss:\/\/[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?@[a-z0-9]{3,24}\.dfs\.core\.windows\.net(?:\/\S*)?$/
+  };
+  if (!warehousePatterns[storage].test(payload.config.warehouse)) {
+    return `Warehouse must be a valid ${storage === "azure" ? "abfss://" : storage === "gcs" ? "gs://" : "s3://"} path.`;
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(payload.config.default_schema)) {
     return "Default schema must use letters, numbers, or underscores.";
+  }
+  if (storage === "gcs") {
+    if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(payload.config.project_id)) {
+      return "Project ID must be a valid GCP project ID (6–30 chars, lowercase).";
+    }
+    if (!editingCatalogId && !payload.password) {
+      return "A service-account JSON key is required for a new GCS catalog.";
+    }
+    return validateServiceAccountKey(payload.password);
+  }
+  if (storage === "azure" && !editingCatalogId && !payload.password) {
+    return "An Azure storage account key is required for a new ADLS catalog.";
   }
   return "";
 }

@@ -633,9 +633,9 @@ class AwsInspector:
         catalogs: list[str],
         catalog_configs: list[dict[str, Any]] | None,
     ) -> list[str]:
-        """Attached catalogs eligible for the Trino file system cache: the
-        S3/Glue family (Hive, Iceberg, Delta Lake) minus Hudi, which upstream
-        does not support caching for."""
+        """Attached Glue-backed catalogs eligible for Trino's file system cache:
+        Hive, Iceberg, and Delta Lake across supported object stores, minus Hudi,
+        which upstream does not support caching for."""
         names = []
         for catalog in catalog_configs or []:
             name = str(catalog.get("name", ""))
@@ -686,6 +686,7 @@ class AwsInspector:
         catalog_configs: list[dict[str, Any]] | None = None,
         secret_resolver: Callable[[str], str] | None = None,
         cache_disks: int = 0,
+        trino_version: str | None = None,
     ) -> dict[str, str]:
         configs = {}
         cache_layout = self.fs_cache_layout(catalogs, catalog_configs, cache_disks)
@@ -707,7 +708,13 @@ class AwsInspector:
             if spec is None:
                 continue
             if spec.kind == "s3_glue":
-                configs[name] = self.glue_catalog_properties(catalog, spec, fs_cache=cache_layout.get(name))
+                configs[name] = self.glue_catalog_properties(
+                    catalog,
+                    spec,
+                    secret_resolver=secret_resolver,
+                    fs_cache=cache_layout.get(name),
+                    trino_version=trino_version,
+                )
             elif spec.kind == "jdbc":
                 configs[name] = self.jdbc_catalog_properties(catalog, secret_resolver)
             elif spec.kind == "mongodb":
@@ -880,13 +887,15 @@ class AwsInspector:
         self,
         catalog: dict[str, Any],
         spec: ConnectorType,
+        secret_resolver: Callable[[str], str] | None = None,
         fs_cache: dict[str, Any] | None = None,
+        trino_version: str | None = None,
     ) -> str:
-        # S3/Glue family renderer: Iceberg, Delta Lake, and Hive share the Glue
-        # metastore + s3.* block and differ only in connector.name, the metastore
-        # selector, and each connector's own read-only security key.
+        # Glue-backed lakehouse renderer. S3 uses the node IAM role; cross-cloud
+        # GCS/ADLS variants resolve their credential only on the signed node path.
         config = catalog.get("config", {})
         connector_name = spec.connector_name or "iceberg"
+        storage_kind = spec.storage_kind or "s3"
         glue_region = str(config["glue_region"])
         s3_region = str(config.get("s3_region") or glue_region)
         warehouse = str(config["warehouse"])
@@ -902,9 +911,35 @@ class AwsInspector:
         lines += [
             f"hive.metastore.glue.region={glue_region}",
             f"hive.metastore.glue.default-warehouse-dir={warehouse}",
-            "fs.s3.enabled=true",
-            f"s3.region={s3_region}",
         ]
+        try:
+            version_number = int(trino_version or TRINO_VERSION)
+        except (TypeError, ValueError):
+            version_number = int(TRINO_VERSION)
+        # Trino 481 shortened fs.native-<cloud>.enabled to fs.<cloud>.enabled.
+        def fs_enabled_property(cloud: str) -> str:
+            return f"fs.{cloud}.enabled" if version_number >= 481 else f"fs.native-{cloud}.enabled"
+
+        if storage_kind == "s3":
+            lines += [f"{fs_enabled_property('s3')}=true", f"s3.region={s3_region}"]
+        elif storage_kind == "gcs":
+            credentials_json = self._require_resolved_secret(catalog, secret_resolver)
+            # Properties files are line-oriented; compact a pretty-printed key to
+            # one JSON line while preserving escaped newlines in private_key.
+            compact_key = json.dumps(json.loads(credentials_json), separators=(",", ":"))
+            lines += [
+                f"{fs_enabled_property('gcs')}=true",
+                "gcs.auth-type=SERVICE_ACCOUNT",
+                f"gcs.project-id={config['project_id']}",
+                f"gcs.json-key={compact_key}",
+            ]
+        elif storage_kind == "azure":
+            access_key = self._require_resolved_secret(catalog, secret_resolver)
+            lines += [
+                f"{fs_enabled_property('azure')}=true",
+                "azure.auth-type=ACCESS_KEY",
+                f"azure.access-key={access_key}",
+            ]
         if connector_name == "iceberg":
             lines.append(f"iceberg.file-format={file_format}")
             lines.append(f"iceberg.security={'READ_ONLY' if read_only else 'ALLOW_ALL'}")
@@ -982,6 +1017,7 @@ class AwsInspector:
             cluster.get("catalog_configs", []),
             secret_resolver=secret_resolver,
             cache_disks=cache_disks,
+            trino_version=trino_version,
         )
         catalog_commands = "\n".join(
             f"cat >/etc/trino/catalog/{name}.properties <<'EOF'\n{content}EOF"
