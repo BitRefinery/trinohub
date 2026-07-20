@@ -6417,8 +6417,8 @@ class TrinoHubApp:
             ):
                 raise ApiError(
                     400,
-                    "Do not store AWS access keys or other object-storage credentials in catalog config; "
-                    "use the credential field.",
+                    "Do not store AWS access keys, secrets, or other object-storage credentials "
+                    "in catalog config; use the credential field.",
                 )
 
         glue_region = str(raw_config.get("glue_region", "")).strip()
