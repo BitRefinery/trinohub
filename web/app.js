@@ -988,8 +988,22 @@ const DATA_CATALOG_TYPES = [
 ];
 
 // Connectors whose JDBC driver isn't bundled and must be uploaded by an admin.
-// Mirrors DRIVER_REQUIRED_TYPES in trinohub/connectors.py.
-const DRIVER_REQUIRED_TYPES = ["oracle"];
+// Mirrors DRIVER_REQUIRED_TYPES in trinohub/connectors.py; only a pre-schema
+// fallback — renderConnectorDriverPanel prefers the server's requires_driver flag.
+const DRIVER_REQUIRED_TYPES = ["oracle", "trino"];
+// Per-connector wording for the upload panel. Types not listed fall back to the
+// generic "unbundled JDBC driver" copy (Oracle et al).
+const DRIVER_PANEL_COPY = {
+  trino: {
+    title: "Connector plugin",
+    note:
+      "The Trino cross-cluster connector isn't shipped in a stock Trino release " +
+      "(it lands via trinodb/trino#30290). Upload the connector's self-contained " +
+      "(shaded) plugin JAR once; cluster nodes install it into /opt/trino/plugin/trino/ " +
+      "at boot. Pin a build tested against your Trino version — local↔remote " +
+      "cross-version compatibility isn't guaranteed. Restart a running cluster to apply."
+  }
+};
 let connectorDrivers = {}; // connector_type -> uploaded driver metadata
 
 // Registry-derived connector form schema from GET /api/connector-types. This is
@@ -1110,9 +1124,20 @@ async function loadConnectorDrivers() {
 function renderConnectorDriverPanel(type) {
   const panel = document.getElementById("catalogDriverPanel");
   if (!panel) return;
-  const needsDriver = DRIVER_REQUIRED_TYPES.includes(type);
+  const schema = connectorSchema(type);
+  const needsDriver = schema ? Boolean(schema.requires_driver) : DRIVER_REQUIRED_TYPES.includes(type);
   panel.hidden = !needsDriver;
   if (!needsDriver) return;
+  // Swap in per-connector wording (e.g. Trino ships a plugin JAR, not a driver).
+  const copy = DRIVER_PANEL_COPY[type];
+  const titleEl = document.getElementById("catalogDriverTitle");
+  const noteEl = document.getElementById("catalogDriverNote");
+  if (titleEl) titleEl.textContent = copy ? copy.title : "JDBC driver";
+  if (noteEl) {
+    noteEl.textContent = copy
+      ? copy.note
+      : "This connector's JDBC driver isn't bundled with Trino (licensing). Upload the driver JAR once; cluster nodes install it at boot. Restart a running cluster to apply a new or changed driver.";
+  }
   const statusEl = document.getElementById("catalogDriverStatus");
   const removeBtn = document.getElementById("catalogDriverDeleteButton");
   const driver = connectorDrivers[type];
@@ -1325,7 +1350,7 @@ const CONNECTOR_NAME_BY_TYPE = {
   s3_glue: "iceberg", delta_glue: "delta_lake", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
-  snowflake: "snowflake", druid: "druid", mongodb: "mongodb",
+  snowflake: "snowflake", druid: "druid", trino: "trino", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "cassandra",
   prometheus: "prometheus",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
@@ -1335,7 +1360,7 @@ const CATALOG_GLYPH_BY_TYPE = {
   s3_glue: "iceberg", delta_glue: "delta", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
-  snowflake: "snowflake", druid: "druid", mongodb: "mongodb",
+  snowflake: "snowflake", druid: "druid", trino: "database", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "database",
   prometheus: "database",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
@@ -3009,6 +3034,7 @@ const CATALOG_TYPE_TITLES = {
   oracle: "Oracle catalog",
   snowflake: "Snowflake catalog",
   druid: "Apache Druid catalog",
+  trino: "Trino cross-cluster catalog",
   mongodb: "MongoDB catalog",
   elasticsearch: "Elasticsearch catalog",
   opensearch: "OpenSearch catalog",
@@ -3037,6 +3063,7 @@ const CATALOG_TYPE_DEFAULT_NAMES = {
   oracle: "warehouse_oracle",
   snowflake: "warehouse_snowflake",
   druid: "warehouse_druid",
+  trino: "remote_trino",
   mongodb: "docs_mongo",
   elasticsearch: "logs_es",
   opensearch: "logs_os",
@@ -3283,8 +3310,8 @@ function renderCatalogEditor(catalog, type) {
          <div id="catalogFields" style="display: contents"></div>
        </div>
        <div id="catalogDriverPanel" class="cat-driver" hidden>
-         <div class="cat-driver-head"><strong>JDBC driver</strong><span id="catalogDriverStatus" class="chip neutral">No driver uploaded</span></div>
-         <p class="cat-driver-note">This connector's JDBC driver isn't bundled with Trino (licensing). Upload the driver JAR once; cluster nodes install it at boot. Restart a running cluster to apply a new or changed driver.</p>
+         <div class="cat-driver-head"><strong id="catalogDriverTitle">JDBC driver</strong><span id="catalogDriverStatus" class="chip neutral">No driver uploaded</span></div>
+         <p id="catalogDriverNote" class="cat-driver-note">This connector's JDBC driver isn't bundled with Trino (licensing). Upload the driver JAR once; cluster nodes install it at boot. Restart a running cluster to apply a new or changed driver.</p>
          <div class="cat-driver-actions">
            <input id="catalogDriverFile" type="file" accept=".jar,application/java-archive" hidden />
            <button class="secondary-button admin-action danger" id="catalogDriverDeleteButton" type="button" hidden>Remove driver</button>

@@ -54,6 +54,24 @@ and provide a **connection URL**, **connection user**, and **password**:
 | Snowflake | `jdbc:snowflake://account.snowflakecomputing.com` |
 | Apache Druid | `jdbc:avatica:remote:url=http://broker:8082/druid/v2/sql/avatica/` |
 
+## Cross-cluster federation (Trino → Trino)
+
+The **Trino** connector federates a *remote* Trino cluster as a catalog, so one
+cluster can query another without copying data. Provide a
+`jdbc:trino://host[:port][/catalog][?SSL=true]` connection URL, a connection
+user, and a password (the remote cluster's credentials). It is read-only and
+pushes down projections, `LIMIT`, and selected predicates, aggregations, and
+joins to the remote cluster.
+
+This connector is **not bundled in a stock Trino release** — it arrives via
+[trinodb/trino#30290](https://github.com/trinodb/trino/pull/30290). Like Oracle,
+you must upload its plugin JAR before a cluster using it can start (see
+[Uploading a connector plugin](#uploading-a-jdbc-driver-oracle) below); upload
+the connector's **self-contained (shaded) plugin JAR**, which nodes drop into
+`/opt/trino/plugin/trino/` at boot. Because the connector is pre-release, pin it
+to a build tested against your Trino version — cross-version compatibility
+between the local and remote clusters is not guaranteed.
+
 ## Document & search stores
 
 - **MongoDB** — a `mongodb://host:27017/database` connection URL (without
@@ -112,11 +130,13 @@ secret.
 
 ## Uploading a JDBC driver (Oracle)
 
-Some connectors ship without a bundled JDBC driver — **Oracle** is the current
-example, because its driver isn't redistributable. When you select such a
+Some connectors ship without a bundled JAR — **Oracle** needs the vendor JDBC
+driver (not redistributable), and the **Trino** cross-cluster connector needs
+its whole plugin JAR (not yet in a stock release). When you select such a
 connector, the form shows a **JDBC driver** panel:
 
-- **Upload driver JAR** — upload the vendor's `.jar` (for Oracle, `ojdbc*.jar`).
+- **Upload driver JAR** — upload the `.jar` (for Oracle, the vendor's
+  `ojdbc*.jar`; for Trino, the connector's shaded plugin JAR).
   It's held on the control plane and its SHA-256 is recorded.
 - At boot, each cluster node downloads the driver into Trino's plugin directory
   and **verifies the SHA-256** before starting.
