@@ -26,7 +26,40 @@ never connects to your clusters or data itself.
 
 ## Configuration (admins)
 
-Ask Trino calls an LLM provider configured on the control plane. The API key is
-read from the server environment; it is **never logged and never returned to the
-browser.** If the feature is unconfigured, the assistant is unavailable and the
+Ask Trino calls an LLM provider from the control plane to draft SQL. It's off
+until you give it an API key. The key lives in the **server environment** — it
+is **never logged and never returned to the browser** — so it can't be set from
+the UI. If the feature is unconfigured, the assistant is unavailable and the
 rest of TrinoHub is unaffected.
+
+### Enable it
+
+1. **Get an API key.** By default Ask Trino talks to
+   [OpenRouter](https://openrouter.ai) — create an account and an API key there.
+   (To use a different OpenAI-compatible provider, see the overrides below.)
+2. **Give the key to the control plane.** Set `OPENROUTER_API_KEY` (or the alias
+   `ASK_TRINO_API_KEY`) in the server environment. The simplest way is a `.env`
+   file in the project root — the app loads it automatically on start:
+
+   ```dotenv
+   # .env (project root; never commit this file)
+   OPENROUTER_API_KEY=sk-or-your-key-here
+   ```
+
+   Alternatively, export it wherever the control plane runs (systemd unit,
+   container env, etc.). See `.env.example` for a template.
+3. **Restart the control plane** so it picks up the new environment.
+4. Open **Ask Trino** from the sidebar — it's now live.
+
+### Model and provider (optional)
+
+- **Model** — the default is `openai/gpt-4o-mini`. Change it in
+  **Settings → Ask Trino** (paste any model id from `openrouter.ai/models`, e.g.
+  `anthropic/claude-sonnet-4.5`), or set `ASK_TRINO_MODEL` in the environment.
+- **Provider** — point at any OpenAI-compatible chat-completions endpoint with
+  `ASK_TRINO_API_BASE` (default:
+  `https://openrouter.ai/api/v1/chat/completions`).
+
+If a request fails with *"Ask Trino is not configured"*, the key isn't set in
+the server environment; if the provider *"rejected the API key,"* check the key
+value and, if you overrode it, the model id and API base.
