@@ -13,6 +13,8 @@ Metadata:
         Parameters: [RepoUrl, GitRef]
       - Label: { default: "Data (node role)" }
         Parameters: [WarehouseBucket]
+      - Label: { default: "Ask Trino (optional)" }
+        Parameters: [OpenRouterApiKey, OpenRouterSecretArn]
 
 Parameters:
   VpcId:
@@ -56,9 +58,28 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
     Description: Latest Ubuntu 24.04 LTS AMI (resolved automatically; leave as-is).
+  OpenRouterApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >-
+      (Optional) OpenRouter API key to enable the Ask Trino assistant. Written to
+      the control plane's .env at boot. NOTE: this value is stored in EC2 user-data;
+      for stronger secrecy set OpenRouterSecretArn instead. Leave blank to configure
+      Ask Trino later.
+  OpenRouterSecretArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:secretsmanager:.*$"
+    Description: >-
+      (Optional) ARN of a Secrets Manager secret holding the OpenRouter API key —
+      either a raw string or JSON with an OPENROUTER_API_KEY field. Takes precedence
+      over OpenRouterApiKey and keeps the key out of user-data. The control-plane
+      role is granted read access to exactly this secret.
 
 Conditions:
   HasSshKey: !Not [!Equals [!Ref SshKeyName, ""]]
+  HasOpenRouterSecret: !Not [!Equals [!Ref OpenRouterSecretArn, ""]]
 
 Resources:
   # ---- Node role passed to Trino cluster nodes (S3 + Glue for Iceberg) ---------
@@ -166,6 +187,21 @@ Resources:
     Properties:
       Roles: [!Ref ControlPlaneRole]
 
+  # Read access to the Ask Trino secret — only when an ARN is supplied.
+  AskTrinoSecretAccess:
+    Type: AWS::IAM::Policy
+    Condition: HasOpenRouterSecret
+    Properties:
+      PolicyName: TrinoHubAskTrinoSecret
+      Roles: [!Ref ControlPlaneRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadAskTrinoSecret
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref OpenRouterSecretArn
+
   # ---- Security group for the control plane ------------------------------------
   ControlPlaneSg:
     Type: AWS::EC2::SecurityGroup
@@ -228,6 +264,32 @@ Resources:
           sudo -u trinohub .venv/bin/pip install --upgrade pip
           sudo -u trinohub .venv/bin/pip install -r requirements.txt
           install -d -o trinohub -g trinohub /opt/trinohub/app/.trinohub
+
+          # --- Ask Trino key (optional) ---------------------------------------
+          # Secrets Manager ARN wins over the inline key. The app auto-loads
+          # /opt/trinohub/app/.env on start (load_dotenv_once). Handled with the
+          # shell trace off so the key never lands in cloud-init logs.
+          set +x
+          ASK_KEY=""
+          if [ -n "${OpenRouterSecretArn}" ]; then
+            apt-get install -y awscli jq || true
+            RAW="$(aws secretsmanager get-secret-value --secret-id "${OpenRouterSecretArn}" --region ${AWS::Region} --query SecretString --output text || true)"
+            if printf '%s' "$RAW" | jq -e . >/dev/null 2>&1; then
+              ASK_KEY="$(printf '%s' "$RAW" | jq -r '.OPENROUTER_API_KEY // .ASK_TRINO_API_KEY // .')"
+            else
+              ASK_KEY="$RAW"
+            fi
+          elif [ -n "${OpenRouterApiKey}" ]; then
+            ASK_KEY="${OpenRouterApiKey}"
+          fi
+          if [ -n "$ASK_KEY" ]; then
+            umask 077
+            printf 'OPENROUTER_API_KEY=%s\n' "$ASK_KEY" > /opt/trinohub/app/.env
+            chown trinohub:trinohub /opt/trinohub/app/.env
+            chmod 600 /opt/trinohub/app/.env
+          fi
+          unset ASK_KEY RAW
+          set -x
 
           cat >/etc/systemd/system/trinohub.service <<'UNIT'
           [Unit]
