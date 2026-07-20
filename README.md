@@ -87,6 +87,9 @@ nodes fetch signed, per-cluster bootstrap config over the private network.
 ### SQL editor — schema browser, syntax highlighting, results, and recent queries
 ![SQL editor](docs/images/06-sql-editor.png)
 
+### Ask Trino — plain-English questions with SQL, tables, and charts
+![Ask Trino](docs/images/12-ask-trino.png)
+
 ### Notebooks — ordered SQL cells with inline tables and charts
 ![Notebooks](docs/images/11-notebook.png)
 
