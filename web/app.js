@@ -2748,6 +2748,42 @@ async function saveSessionHours() {
   }
 }
 
+async function loadResultCacheSettings() {
+  try {
+    const data = await apiRequest("/api/query-cache");
+    const input = document.getElementById("cacheTtlInput");
+    if (input) input.value = String(data.result_cache_ttl_minutes);
+    const chip = document.getElementById("cacheTtlChip");
+    if (chip) {
+      chip.textContent = data.result_cache_ttl_minutes > 0 ? `${data.result_cache_ttl_minutes} min` : "Off";
+    }
+  } catch (error) {
+    // Non-operators: leave defaults.
+  }
+}
+
+async function saveResultCacheTtl() {
+  const raw = document.getElementById("cacheTtlInput").value.trim();
+  const minutes = Number(raw);
+  if (!raw || !Number.isInteger(minutes) || minutes < 0) {
+    showToast("Enter the cache lifetime as a whole number of minutes (0 disables).", { type: "error" });
+    return;
+  }
+  try {
+    await apiRequest("/api/query-cache", {
+      method: "PUT",
+      body: JSON.stringify({ result_cache_ttl_minutes: minutes }),
+    });
+    await loadResultCacheSettings();
+    showToast(
+      minutes > 0 ? `Cached results now serve for ${minutes} minutes.` : "Result cache disabled.",
+      { type: "success" }
+    );
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
 async function revokeMySessions() {
   const confirmed = await appConfirm({
     title: "Sign out everywhere?",
@@ -3826,6 +3862,7 @@ function navigateTo(viewName) {
     loadAuditLog();
     loadSsoSettings();
     loadSessionSettings();
+    loadResultCacheSettings();
     loadApiTokens();
     loadNotificationSettings();
     loadAskSettings();
@@ -4558,7 +4595,9 @@ function renderHistory() {
       .map(
         (row) => `
         <tr data-history-query-id="${row.id}" class="${row.id === selectedHistoryQueryId ? "selected" : ""}">
-          <td><span class="chip ${statusClass(row.status)}">${row.status}</span></td>
+          <td><span class="chip ${statusClass(row.status)}">${row.status}</span>${
+            row.cache_hit ? ' <span class="chip info" title="Served from the result cache">Cached</span>' : ""
+          }</td>
           <td><code>${escapeHtml(row.query)}</code></td>
           <td>${escapeHtml(row.cluster)}</td>
           <td>${escapeHtml(row.user)}</td>
@@ -4628,7 +4667,9 @@ function showQueryDetail(id) {
   selectedHistoryQueryId = id;
   panel.hidden = false;
   document.getElementById("queryDetailTitle").textContent = `Query #${query.id}`;
-  document.getElementById("queryDetailStatus").textContent = query.status;
+  document.getElementById("queryDetailStatus").textContent = query.cache_hit
+    ? `${query.status} (cached${query.result_cached_at ? `, ran ${relativeTime(query.result_cached_at)}` : ""})`
+    : query.status;
   document.getElementById("queryDetailCluster").textContent = query.cluster;
   document.getElementById("queryDetailContext").textContent = [query.catalog, query.schema].filter(Boolean).join(".") || "-";
   document.getElementById("queryDetailElapsed").textContent = query.elapsed;
@@ -4904,6 +4945,8 @@ async function loadQueryHistoryFromApi() {
         rows: String(query.row_count),
         error_message: query.error_message || "",
         trino_query_id: query.trino_query_id || "",
+        cache_hit: Boolean(query.cache_hit),
+        result_cached_at: query.result_cached_at || "",
         created_at: query.created_at,
         updated_at: query.updated_at
     }));
@@ -6823,6 +6866,8 @@ function wireSettings() {
   if (saveSso) saveSso.addEventListener("click", saveSsoSettings);
   const saveSession = document.getElementById("saveSessionHoursButton");
   if (saveSession) saveSession.addEventListener("click", saveSessionHours);
+  const saveCacheTtl = document.getElementById("saveCacheTtlButton");
+  if (saveCacheTtl) saveCacheTtl.addEventListener("click", saveResultCacheTtl);
   const revokeSessions = document.getElementById("revokeSessionsButton");
   if (revokeSessions) revokeSessions.addEventListener("click", revokeMySessions);
   const createToken = document.getElementById("createApiTokenButton");
@@ -6999,6 +7044,27 @@ function setQueryState(state, elapsed = "0.0s", rows = "0") {
   status.className = `chip ${statusClass(state)}`;
   document.getElementById("queryElapsed").textContent = elapsed;
   document.getElementById("queryRows").textContent = rows;
+  // A state change starts from "not cached"; applyQueryResult re-shows the
+  // badge right after when the result it renders was cache-served.
+  updateCacheBadge(null);
+}
+
+// "Cached — ran Nm ago" badge plus the Run fresh bypass, shown only when the
+// rendered result was served from the result cache. Results are point-in-time
+// snapshots; result_cached_at says when they were actually produced.
+function updateCacheBadge(query) {
+  const badge = document.getElementById("cacheBadge");
+  const runFresh = document.getElementById("runFresh");
+  const hit = Boolean(query && query.cache_hit);
+  if (badge) {
+    badge.hidden = !hit;
+    if (hit) {
+      const age = relativeTime(query.result_cached_at);
+      badge.textContent = age && age !== "just now" ? `Cached — ran ${age}` : "Cached — just ran";
+      badge.title = "Served from the result cache without contacting the cluster. Use Run fresh to re-execute.";
+    }
+  }
+  if (runFresh) runFresh.hidden = !hit;
 }
 
 function renderQueryResults(query) {
@@ -7078,7 +7144,8 @@ function renderQueryProfile(query) {
     ["Rows returned", query.total_row_count],
     ["CSV rows", query.download_row_count],
     ["Result bytes", query.result_bytes],
-    ["Truncated", query.truncated ? "Yes" : "No"]
+    ["Truncated", query.truncated ? "Yes" : "No"],
+    ["Cached", query.cache_hit ? `Yes — ran ${relativeTime(query.result_cached_at) || "earlier"}` : "No"]
   ];
   target.innerHTML = `
     <div class="query-profile-grid">
@@ -7461,6 +7528,7 @@ function downloadLatestBatchResult() {
 function applyQueryResult(query, options = {}) {
   activeQueryResult = query;
   setQueryState(query.status, formatElapsedMs(query.elapsed_ms), String(query.row_count));
+  updateCacheBadge(query);
   renderQueryResults(query);
   document.getElementById("downloadCsv").disabled = !(query.data || []).length;
   if (options.renderNav !== false) renderQueryResultNav();
@@ -7504,14 +7572,15 @@ function reflectPendingClusterStart(query) {
     '<div class="empty-results">Cluster is resuming from auto-suspend. Your query runs automatically once it is ready.</div>';
 }
 
-async function submitSqlStatement(clusterId, sqlText, resultIndex = -1) {
+async function submitSqlStatement(clusterId, sqlText, resultIndex = -1, options = {}) {
   const result = await apiRequest("/api/query", {
     method: "POST",
     body: JSON.stringify({
       cluster_id: Number(clusterId),
       catalog: document.getElementById("queryCatalog").value,
       schema: document.getElementById("querySchema").value,
-      sql: sqlText
+      sql: sqlText,
+      fresh: Boolean(options.fresh)
     })
   });
   activeQueryId = result.query.id;
@@ -7524,7 +7593,7 @@ async function submitSqlStatement(clusterId, sqlText, resultIndex = -1) {
   return waitForQueryTerminal(result.query.id, resultIndex);
 }
 
-async function runSqlStatements(clusterId, statements) {
+async function runSqlStatements(clusterId, statements, options = {}) {
   let terminal = null;
   resetQueryBatchResults(statements);
   for (let index = 0; index < statements.length; index += 1) {
@@ -7534,7 +7603,7 @@ async function runSqlStatements(clusterId, statements) {
       `${prefix}Submitting query to Trino.`
     )}</div>`;
     setQueryState("Queued", "0.0s", "0");
-    terminal = await submitSqlStatement(clusterId, statements[index].sql, index);
+    terminal = await submitSqlStatement(clusterId, statements[index].sql, index, options);
     if (!terminal) break;
     finishTerminalQuery(terminal, { toast: statements.length === 1 });
     if (terminal.status !== "Finished") break;
@@ -7741,7 +7810,7 @@ function wireSqlEditor() {
 
     try {
       await saveActiveQueryTabNow();
-      const terminal = await runSqlStatements(clusterId, statements);
+      const terminal = await runSqlStatements(clusterId, statements, { fresh: Boolean(options.fresh) });
       if (statements.length > 1 && terminal) {
         if (terminal.status === "Finished" && !queryBatchCancelled) {
           showToast(`Ran ${statements.length} statements.`);
@@ -7766,6 +7835,8 @@ function wireSqlEditor() {
 
   run.addEventListener("click", () => runCurrentEditor());
   runAndDownload.addEventListener("click", () => runCurrentEditor({ downloadAfterFinish: true }));
+  const runFreshButton = document.getElementById("runFresh");
+  if (runFreshButton) runFreshButton.addEventListener("click", () => runCurrentEditor({ fresh: true }));
   const explainButton = document.getElementById("explainQuery");
   if (explainButton) explainButton.addEventListener("click", () => runCurrentEditor({ explain: true }));
   const explainAnalyzeButton = document.getElementById("explainAnalyzeQuery");

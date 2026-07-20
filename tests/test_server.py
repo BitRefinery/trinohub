@@ -2898,6 +2898,317 @@ class ServerModelTests(unittest.TestCase):
         payload = self.app.query_csv_payload(query["id"], user)
         self.assertEqual(len(payload["rows"]), 1200)
 
+    def _canned_submit(self, submitted, data=None):
+        def submit(**kwargs):
+            submitted.append(kwargs)
+            return {
+                "id": f"cache-query-{len(submitted)}",
+                "columns": [{"name": "n", "type": "integer"}],
+                "data": data if data is not None else [[1], [2]],
+            }
+
+        return submit
+
+    def test_query_cache_serves_identical_rerun_without_trino(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT n FROM t"}
+
+        first = self.app.create_query(dict(base), user)["query"]
+        self.assertFalse(first["cache_hit"])
+
+        second = self.app.create_query(dict(base), user)["query"]
+
+        self.assertEqual(len(submitted), 1)  # the re-run never reached Trino
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(second["status"], "Finished")
+        self.assertEqual(second["data"], [[1], [2]])
+        self.assertEqual(second["cached_from_query_id"], first["id"])
+        self.assertEqual(second["result_cached_at"], first["updated_at"])
+        self.assertNotEqual(second["id"], first["id"])
+        # Both the fresh run and the cache-served run appear in history.
+        self.assertEqual(len(self.app.list_query_history(user)["queries"]), 2)
+
+    def test_query_cache_normalizes_whitespace_comments_and_case(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        self.app.create_query(
+            {
+                "cluster_id": cluster["id"],
+                "catalog": "tpch",
+                "schema": "sf1",
+                "sql": "SELECT n\n  FROM t -- daily refresh",
+            },
+            user,
+        )
+        result = self.app.create_query(
+            {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "select  n from t"},
+            user,
+        )["query"]
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(result["cache_hit"])
+
+    def test_query_cache_misses_on_different_sql_or_context(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+        self.app.create_query(dict(base, sql="SELECT 2"), user)
+        self.app.create_query(dict(base, schema="sf100"), user)
+        self.app.create_query(dict(base, catalog="tpcds"), user)
+        self.assertEqual(len(submitted), 4)
+
+    def test_query_cache_expires_after_ttl(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        first = self.app.create_query(dict(base), user)["query"]
+        # Age the source run past the (default 10 minute) TTL.
+        with self.app.conn() as conn:
+            conn.execute(
+                "UPDATE query_runs SET updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+                (first["id"],),
+            )
+        second = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(second["cache_hit"])
+
+    def test_query_cache_is_scoped_per_user(self):
+        cluster, user = self.create_running_cluster()
+        other = self.app.create_user(
+            {"username": "analyst", "password": "correct-horse-password", "role": "user"}
+        )["user"]
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+        result = self.app.create_query(dict(base), other)["query"]
+        # Another user re-running the same SQL executes for real: cache entries
+        # never cross user boundaries.
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(result["cache_hit"])
+
+    def test_query_cache_fresh_flag_bypasses_cache(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+        result = self.app.create_query(dict(base, fresh=True), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(result["cache_hit"])
+
+    def test_query_cache_disabled_when_ttl_zero(self):
+        cluster, user = self.create_running_cluster()
+        self.app.set_result_cache_ttl({"result_cache_ttl_minutes": 0}, user)
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+        result = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(result["cache_hit"])
+
+    def test_query_cache_skips_non_select_statements(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "sql": "SHOW SCHEMAS"}
+        self.app.create_query(dict(base), user)
+        result = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(result["cache_hit"])
+
+    def test_query_cache_skips_failed_runs(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+
+        def submit(**kwargs):
+            submitted.append(kwargs)
+            if len(submitted) == 1:
+                return {"id": "failed-query", "error": {"message": "Table not found"}}
+            return {"id": "ok-query", "columns": [{"name": "n", "type": "integer"}], "data": [[1]]}
+
+        self.app.submit_trino_query = submit
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        first = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(first["status"], "Failed")
+        second = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(second["cache_hit"])
+
+    def test_cached_run_csv_reuses_download_buffer(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted, data=[[i] for i in range(1200)])
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT n FROM big"}
+        self.app.create_query(dict(base), user)
+        cached = self.app.create_query(dict(base), user)["query"]
+        self.assertTrue(cached["cache_hit"])
+        self.assertTrue(cached["truncated"])
+        self.assertEqual(cached["row_count"], 1000)
+        payload = self.app.query_csv_payload(cached["id"], user)
+        self.assertEqual(len(payload["rows"]), 1200)
+        # CSV export of the cache-served run never re-executed the query.
+        self.assertEqual(len(submitted), 1)
+
+    def test_query_cache_hit_on_suspended_cluster_serves_without_resume(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+
+        with self.app.conn() as conn:
+            conn.execute(
+                "UPDATE clusters SET status = 'Suspended', auto_suspend_minutes = 15 WHERE id = ?",
+                (cluster["id"],),
+            )
+
+        def refuse_resume(*args, **kwargs):
+            raise AssertionError("A cache hit must not resume the cluster.")
+
+        self.app.start_cluster = refuse_resume
+        result = self.app.create_query(dict(base), user)["query"]
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(result["status"], "Finished")
+        self.assertEqual(len(submitted), 1)
+        with self.app.conn() as conn:
+            status = conn.execute("SELECT status FROM clusters WHERE id = ?", (cluster["id"],)).fetchone()[0]
+        self.assertEqual(status, "Suspended")
+
+    def test_set_result_cache_ttl_validates_and_persists(self):
+        with self.assertRaises(ApiError) as context:
+            self.app.set_result_cache_ttl({"result_cache_ttl_minutes": 5})
+        self.assertEqual(context.exception.status, 409)
+
+        self.app.complete_setup({"username": "admin", "password": "correct-horse-password"})
+        self.assertEqual(self.app.result_cache_ttl_minutes(), 10)  # default
+        self.assertEqual(
+            self.app.set_result_cache_ttl({"result_cache_ttl_minutes": 30})["result_cache_ttl_minutes"], 30
+        )
+        self.assertEqual(self.app.result_cache_ttl_minutes(), 30)
+        self.assertEqual(
+            self.app.set_result_cache_ttl({"result_cache_ttl_minutes": 0})["result_cache_ttl_minutes"], 0
+        )
+        for bad in (-1, 100000, "abc", None):
+            with self.assertRaises(ApiError) as context:
+                self.app.set_result_cache_ttl({"result_cache_ttl_minutes": bad})
+            self.assertEqual(context.exception.status, 400)
+
+    def test_query_cache_hits_across_leading_comments(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1"}
+        self.app.create_query(dict(base, sql="SELECT 1"), user)
+        result = self.app.create_query(dict(base, sql="-- refreshed hourly\nSELECT 1"), user)["query"]
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(result["cache_hit"])
+
+    def test_query_cache_not_served_for_disabled_cluster(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+
+        with self.app.conn() as conn:
+            conn.execute("UPDATE clusters SET status = 'Not enabled' WHERE id = ?", (cluster["id"],))
+
+        # Disabling a cluster cuts off its data: the warm cache must not answer.
+        with self.assertRaises(ApiError) as context:
+            self.app.create_query(dict(base), user)
+        self.assertEqual(context.exception.status, 409)
+        self.assertEqual(len(submitted), 1)
+
+    def test_query_cache_flushed_by_security_audit_mutations(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        self.app.create_query(dict(base), user)
+
+        # Any role/policy/tag/user/catalog/cluster mutation invalidates cached
+        # results produced under the old rules.
+        self.app.audit(user, "policy.create", "role=analysts catalog=tpch")
+
+        result = self.app.create_query(dict(base), user)["query"]
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(result["cache_hit"])
+
+    def test_query_cache_invalidated_by_own_write_statement(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1"}
+        self.app.create_query(dict(base, sql="SELECT n FROM t"), user)
+        # A non-read-only statement from the same user on the same cluster
+        # expires their cached entries there.
+        self.app.create_query(dict(base, sql="DELETE FROM t WHERE bad = true"), user)
+        result = self.app.create_query(dict(base, sql="SELECT n FROM t"), user)["query"]
+        self.assertEqual(len(submitted), 3)
+        self.assertFalse(result["cache_hit"])
+
+    def test_scheduled_jobs_never_consume_the_cache(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        job = self.app.create_job(
+            {
+                "name": "watcher",
+                "sql": "SELECT count(*) FROM tpch.sf1.nation",
+                "cluster_id": cluster["id"],
+                "schedule_type": "interval",
+                "interval_minutes": 5,
+            },
+            user,
+        )["job"]
+
+        self.app.run_job_now(job["id"], user)
+        self.assertEqual(len(submitted), 1)
+        # The job's run seeds the cache: an interactive re-run of the same SQL hits.
+        interactive = self.app.create_query(
+            {"cluster_id": cluster["id"], "sql": "SELECT count(*) FROM tpch.sf1.nation"}, user
+        )["query"]
+        self.assertTrue(interactive["cache_hit"])
+        self.assertEqual(len(submitted), 1)
+        # But the job itself always executes for real.
+        self.app.run_job_now(job["id"], user)
+        self.assertEqual(len(submitted), 2)
+
+    def test_run_readonly_sql_reports_cache_and_supports_fresh(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "sql": "SELECT n FROM t"}
+        self.app.create_query(dict(base), user)
+
+        cached = self.app.run_readonly_sql(dict(base), user)
+        self.assertTrue(cached["cached"])
+        self.assertTrue(cached["result_cached_at"])
+        self.assertEqual(len(submitted), 1)
+
+        fresh = self.app.run_readonly_sql(dict(base, fresh=True), user)
+        self.assertFalse(fresh["cached"])
+        self.assertEqual(len(submitted), 2)
+
+    def test_cached_run_has_no_trino_query_id(self):
+        cluster, user = self.create_running_cluster()
+        submitted = []
+        self.app.submit_trino_query = self._canned_submit(submitted)
+        base = {"cluster_id": cluster["id"], "catalog": "tpch", "schema": "sf1", "sql": "SELECT 1"}
+        first = self.app.create_query(dict(base), user)["query"]
+        self.assertTrue(first["trino_query_id"])
+        cached = self.app.create_query(dict(base), user)["query"]
+        # The cache-served run never reached a coordinator; pointing the query
+        # profile at the source's Trino execution would mislabel its stats.
+        self.assertEqual(cached["trino_query_id"], "")
+
     def test_query_tabs_are_user_owned_and_persist_context(self):
         user = self._setup_admin()
         cluster = self.app.create_cluster(

@@ -43,8 +43,8 @@ Parameters:
     Description: Git URL to clone TrinoHub from.
   GitRef:
     Type: String
-    Default: main
-    Description: Branch or tag to deploy.
+    Default: v0.2.0
+    Description: Release tag, branch, or commit to deploy. Release tags are recommended.
   WarehouseBucket:
     Type: String
     Default: REPLACE-ME-warehouse-bucket
@@ -260,6 +260,9 @@ Resources:
           nginx -t && systemctl reload nginx
 
 Outputs:
+  DeployedGitRef:
+    Description: Git branch, tag, or commit selected when this instance was created.
+    Value: !Ref GitRef
   UiUrl:
     Description: Open this to reach the setup wizard.
     Value: !Sub "http://${ControlPlaneInstance.PublicIp}/"

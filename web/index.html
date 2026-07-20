@@ -839,8 +839,10 @@ LIMIT 10;</textarea>
                     <button class="results-tab" type="button" data-result-view="profile">Query profile</button>
                     <div class="query-result-nav" id="queryResultNav" hidden></div>
                     <div class="results-tabs-spacer"></div>
+                    <span class="chip info" id="cacheBadge" hidden>Cached</span>
                     <span class="chip neutral" id="queryStatus">Ready</span>
                     <span class="results-meta">Elapsed <strong id="queryElapsed">0.0s</strong> · Rows <strong id="queryRows">0</strong></span>
+                    <button class="ghost-button" id="runFresh" type="button" hidden>Run fresh</button>
                     <button class="ghost-button" id="downloadCsv" type="button" disabled>
                       <span data-icon="download"></span>
                       CSV
@@ -1471,6 +1473,23 @@ LIMIT 10;</textarea>
                     <input type="number" id="sessionHoursInput" class="admin-action" min="1" max="168" aria-label="Session lifetime in hours" />
                     <button class="secondary-button admin-action" id="saveSessionHoursButton" type="button">Save</button>
                     <button class="ghost-button" id="revokeSessionsButton" type="button">Sign out everywhere</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Result cache</h3>
+                  <span class="chip neutral" id="cacheTtlChip">10 min</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Identical read-only re-runs within this window are served from the stored
+                    result set instead of contacting the cluster. Results are point-in-time
+                    snapshots, cached per user. Set to 0 to disable.
+                  </p>
+                  <div class="base-domain-row">
+                    <input type="number" id="cacheTtlInput" class="admin-action" min="0" max="1440" aria-label="Result cache lifetime in minutes" />
+                    <button class="secondary-button admin-action" id="saveCacheTtlButton" type="button">Save</button>
                   </div>
                 </div>
               </div>

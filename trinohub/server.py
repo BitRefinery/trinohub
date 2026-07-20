@@ -169,6 +169,11 @@ MAX_QUERY_RESULT_ROWS = 1000
 MAX_QUERY_RESULT_BYTES = 10 * 1024 * 1024
 MAX_QUERY_DOWNLOAD_ROWS = 10_000
 MAX_QUERY_DOWNLOAD_BYTES = 50 * 1024 * 1024
+# Result cache (issue #1): identical read-only re-runs within the TTL are served
+# from the stored capped result set instead of contacting the cluster. Entries
+# are scoped per user; 0 disables serving from cache.
+DEFAULT_RESULT_CACHE_TTL_MINUTES = 10
+MAX_RESULT_CACHE_TTL_MINUTES = 24 * 60
 CONTROL_PLANE_NODE_CONFIG_PORT = 8000
 MAX_METADATA_ROWS = 1000
 MAX_METADATA_PAGES = 20
@@ -379,6 +384,89 @@ def mask_sql_for_scanning(sql_text: str) -> str:
     text = re.sub(r"--[^\n]*", "", text)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     return text
+
+
+def normalize_sql_for_cache(sql_text: str) -> str:
+    """Canonical form of a statement for result-cache keying.
+
+    Comments are dropped and runs of whitespace outside quoted regions collapse to
+    a single space, so cosmetic reformatting of the same query still hits the
+    cache. Text outside quotes is lowercased (keywords and unquoted identifiers
+    are case-insensitive in Trino); string literals and quoted identifiers are
+    kept byte-exact because their case is significant.
+    """
+    out: list[str] = []
+    state = "normal"
+    i = 0
+    length = len(sql_text)
+    while i < length:
+        ch = sql_text[i]
+        nxt = sql_text[i + 1] if i + 1 < length else ""
+        if state == "normal":
+            if ch == "-" and nxt == "-":
+                state = "line_comment"
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                i += 2
+                continue
+            if ch in {"'", '"'}:
+                state = "string" if ch == "'" else "quoted_ident"
+                out.append(ch)
+                i += 1
+                continue
+            if ch.isspace():
+                if out and out[-1] != " ":
+                    out.append(" ")
+                i += 1
+                continue
+            out.append(ch.lower())
+            i += 1
+            continue
+        if state == "line_comment":
+            if ch == "\n":
+                state = "normal"
+                if out and out[-1] != " ":
+                    out.append(" ")
+            i += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "normal"
+                if out and out[-1] != " ":
+                    out.append(" ")
+                i += 2
+                continue
+            i += 1
+            continue
+        out.append(ch)
+        if state == "string" and ch == "'":
+            if nxt == "'":  # escaped quote stays inside the literal
+                out.append(nxt)
+                i += 2
+                continue
+            state = "normal"
+        elif state == "quoted_ident" and ch == '"':
+            state = "normal"
+        i += 1
+    return "".join(out).strip()
+
+
+def is_cacheable_sql(statement: str) -> bool:
+    """Only read-only statements may produce or consume cache entries."""
+    match = re.match(r"\s*([a-zA-Z]+)", statement)
+    return bool(match) and match.group(1).lower() in {"select", "with"}
+
+
+def query_cache_key(
+    user_id: Any, cluster_id: Any, catalog: str, schema_name: str, normalized_sql: str
+) -> str:
+    """Result-cache key over an already-normalized statement. Includes the user
+    id so a cached result is only ever served back to the user whose run
+    produced it — cache reuse can never widen who sees a result set."""
+    material = "\n".join([str(user_id), str(cluster_id), catalog, schema_name, normalized_sql])
+    return token_hash(material)
 
 
 def validate_read_only_sql(sql_text: str) -> str:
@@ -846,6 +934,12 @@ class TrinoHubApp:
                     utc_now(),
                 ),
             )
+            # Mutations to who-can-see-what (roles, policies, tags, users) or to
+            # what-data-is-behind-a-name (catalogs, clusters) must not be
+            # outlived by cached results produced under the old rules. These are
+            # rare admin actions, so flushing the whole result cache is cheap.
+            if action.split(".")[0] in {"role", "policy", "tag", "tag_policy", "user", "catalog", "cluster"}:
+                conn.execute("UPDATE query_runs SET cache_key = '' WHERE cache_key != ''")
         # Security-sensitive mutations can also fan out to the webhook channel.
         if action.split(".")[0] in {"user", "role", "settings", "token"}:
             actor_name = (actor or {}).get("username") or "system"
@@ -1219,6 +1313,34 @@ class TrinoHubApp:
             conn.execute("UPDATE setup_settings SET session_hours = ? WHERE id = 1", (hours,))
         self.audit(actor, "settings.session_hours", str(hours))
         return {"session_hours": hours}
+
+    def result_cache_ttl_minutes(self) -> int:
+        setup = self.setup_row()
+        raw = setup.get("result_cache_ttl_minutes") if setup else None
+        try:
+            minutes = int(raw) if raw is not None else DEFAULT_RESULT_CACHE_TTL_MINUTES
+        except (TypeError, ValueError):
+            minutes = DEFAULT_RESULT_CACHE_TTL_MINUTES
+        return min(max(minutes, 0), MAX_RESULT_CACHE_TTL_MINUTES)
+
+    def set_result_cache_ttl(self, payload: dict[str, Any], actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        setup = self.setup_row()
+        if not setup:
+            raise ApiError(409, "Complete setup before configuring the result cache.")
+        raw = payload.get("result_cache_ttl_minutes")
+        try:
+            minutes = int(raw)
+        except (TypeError, ValueError):
+            raise ApiError(400, "result_cache_ttl_minutes must be an integer.") from None
+        if minutes < 0 or minutes > MAX_RESULT_CACHE_TTL_MINUTES:
+            raise ApiError(
+                400,
+                f"result_cache_ttl_minutes must be between 0 (disabled) and {MAX_RESULT_CACHE_TTL_MINUTES}.",
+            )
+        with self.conn() as conn:
+            conn.execute("UPDATE setup_settings SET result_cache_ttl_minutes = ? WHERE id = 1", (minutes,))
+        self.audit(actor, "settings.result_cache_ttl", str(minutes))
+        return {"result_cache_ttl_minutes": minutes}
 
     def allowed_ui_cidrs_settings(self) -> dict[str, Any]:
         setup = self.setup_row()
@@ -1838,6 +1960,10 @@ class TrinoHubApp:
                         "sql": job["sql_text"],
                         "catalog": job["catalog"],
                         "schema": job["schema_name"],
+                        # Jobs exist to observe fresh data on a schedule; a job
+                        # with an interval inside the cache TTL must never be
+                        # served its own previous snapshot.
+                        "fresh": True,
                     },
                     row_to_dict(run_as),
                 )
@@ -2988,6 +3114,7 @@ class TrinoHubApp:
                 "sql": sql_text,
                 "catalog": str(payload.get("catalog") or ""),
                 "schema": str(payload.get("schema") or ""),
+                "fresh": bool(payload.get("fresh")),
             },
             user,
         )
@@ -3005,6 +3132,10 @@ class TrinoHubApp:
             "truncated": bool(query.get("truncated")),
             "error": query.get("error_message") or None,
             "query_id": query["id"],
+            # Callers polling for change need to know a result was served from
+            # the cache (and can pass fresh=true to force re-execution).
+            "cached": bool(query.get("cache_hit")),
+            "result_cached_at": query.get("result_cached_at") or None,
         }
 
     # --- Query details (Phase 3) -----------------------------------------------
@@ -7166,11 +7297,39 @@ class TrinoHubApp:
         now = utc_now()
         auto_resume_cluster = False
         endpoint = None
+        # Keying on the normalized statement (not the raw text) also decides
+        # eligibility, so a leading comment can't mask the SELECT keyword.
+        normalized_sql = normalize_sql_for_cache(sql_text)
+        cache_key = (
+            query_cache_key(user["id"], cluster_id, catalog, schema_name, normalized_sql)
+            if is_cacheable_sql(normalized_sql)
+            else ""
+        )
+        cache_ttl = self.result_cache_ttl_minutes() if cache_key else 0
+        use_cache = bool(cache_key) and cache_ttl > 0 and not payload.get("fresh")
         with self.conn() as conn:
             cluster_row = conn.execute("SELECT * FROM clusters WHERE id = ?", (cluster_id,)).fetchone()
             if not cluster_row:
                 raise ApiError(404, "Cluster not found.")
             cluster = self.public_cluster(cluster_row)
+            # Cached results are only served while the cluster is in a state
+            # that would accept the query anyway (Running, or auto-suspended
+            # and about to resume). A disabled, failed, or manually suspended
+            # cluster keeps rejecting re-runs even when a cached result
+            # exists — disabling a cluster must cut off its data.
+            status_accepts_sql = cluster["status"] == "Running" or (
+                cluster["status"] == "Suspended" and cluster["auto_suspend_minutes"] is not None
+            )
+            if use_cache and status_accepts_sql:
+                # A hit is served straight from the stored capped result set —
+                # no coordinator round-trip, and a suspended cluster stays
+                # suspended instead of resuming for a repeat query.
+                source = self._cached_result_source(conn, cache_key, cache_ttl, user["id"])
+                if source is not None:
+                    cached_run = self._insert_cached_run(
+                        conn, source, user, cluster, sql_text, catalog, schema_name, now
+                    )
+                    return {"query": self.public_query(cached_run)}
             if cluster["status"] == "Running":
                 coordinator = conn.execute(
                     """
@@ -7195,15 +7354,24 @@ class TrinoHubApp:
                 """
                 INSERT INTO query_runs
                   (user_id, cluster_id, cluster_name, sql_text, status, catalog, schema_name,
-                   pending_cluster_start, elapsed_ms, row_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'Queued', ?, ?, ?, 0, 0, ?, ?)
+                   pending_cluster_start, cache_key, elapsed_ms, row_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'Queued', ?, ?, ?, ?, 0, 0, ?, ?)
                 """,
                 (
                     user["id"], cluster_id, cluster["name"], sql_text, catalog, schema_name,
-                    1 if auto_resume_cluster else 0, now, now,
+                    1 if auto_resume_cluster else 0, cache_key, now, now,
                 ),
             )
             query_id = int(cursor.lastrowid)
+            if not cache_key:
+                # A non-read-only statement may change data this user has
+                # cached results for; expire their entries on this cluster so
+                # a follow-up SELECT re-executes instead of showing
+                # pre-write rows.
+                conn.execute(
+                    "UPDATE query_runs SET cache_key = '' WHERE user_id = ? AND cluster_id = ? AND cache_key != ''",
+                    (user["id"], cluster_id),
+                )
 
         if auto_resume_cluster:
             # Kick off the resume outside the DB transaction (it launches AWS
@@ -7421,6 +7589,80 @@ class TrinoHubApp:
         if query["user_id"] != user["id"] and not self.has_privilege(user, privilege):
             raise ApiError(404, "Query not found.")
 
+    def _cached_result_source(
+        self, conn: sqlite3.Connection, cache_key: str, ttl_minutes: int, user_id: Any
+    ) -> dict[str, Any] | None:
+        """Most recent successful run for this cache key whose results are still
+        inside the TTL window. Only fresh runs (cache_hit = 0) are sources, so a
+        chain of hits can never extend a result set's lifetime past the TTL.
+
+        The user id is part of the cache key already, but it is also an explicit
+        predicate here so the per-user boundary holds structurally even if the
+        key material is ever changed."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)).isoformat(
+            timespec="seconds"
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM query_runs
+            WHERE cache_key = ? AND user_id = ? AND cache_hit = 0 AND status = 'Finished'
+              AND error_message = '' AND updated_at >= ?
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (cache_key, user_id, cutoff),
+        ).fetchone()
+        return row_to_dict(row)
+
+    def _insert_cached_run(
+        self,
+        conn: sqlite3.Connection,
+        source: dict[str, Any],
+        user: dict[str, Any],
+        cluster: dict[str, Any],
+        sql_text: str,
+        catalog: str,
+        schema_name: str,
+        now: str,
+    ) -> sqlite3.Row:
+        """Record a cache-served run as its own history row, copying the source's
+        capped result buffers so display and CSV export keep working without ever
+        re-executing the query. trino_query_id stays empty — this run never
+        reached a coordinator, and copying the source's id would make the query
+        profile fetch execution details for a different run."""
+        cursor = conn.execute(
+            """
+            INSERT INTO query_runs
+              (user_id, cluster_id, cluster_name, sql_text, status,
+               catalog, schema_name, columns_json, data_json, download_data_json,
+               elapsed_ms, row_count, total_row_count, download_row_count,
+               truncated, download_truncated, result_bytes, cache_hit,
+               cached_from_query_id, result_cached_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'Finished', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                user["id"],
+                cluster["id"],
+                cluster["name"],
+                sql_text,
+                catalog,
+                schema_name,
+                source["columns_json"],
+                source["data_json"],
+                source["download_data_json"],
+                source["row_count"],
+                source["total_row_count"],
+                source["download_row_count"],
+                source["truncated"],
+                source["download_truncated"],
+                source["result_bytes"],
+                source["id"],
+                source["updated_at"],
+                now,
+                now,
+            ),
+        )
+        return conn.execute("SELECT * FROM query_runs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+
     def rows_with_limits(
         self,
         existing_data: list[Any],
@@ -7617,6 +7859,9 @@ class TrinoHubApp:
             "result_bytes": row["result_bytes"],
             "error_message": row["error_message"],
             "pending_cluster_start": bool(row["pending_cluster_start"]) if "pending_cluster_start" in keys else False,
+            "cache_hit": bool(row["cache_hit"]) if "cache_hit" in keys else False,
+            "cached_from_query_id": row["cached_from_query_id"] if "cached_from_query_id" in keys else None,
+            "result_cached_at": row["result_cached_at"] if "result_cached_at" in keys else "",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -7715,6 +7960,8 @@ class TrinoHubApp:
         if status == "Failed":
             result["error"] = query.get("error_message") or "The query failed to run."
         result["status"] = status
+        result["cached"] = bool(query.get("cache_hit"))
+        result["result_cached_at"] = query.get("result_cached_at") or None
         # The cluster was auto-suspended: create_query queued the SQL and kicked off
         # a resume. Surface that so the browser can show "Starting cluster" and keep
         # polling the query until the cluster is Running and it dispatches.

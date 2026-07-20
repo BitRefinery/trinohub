@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import __version__
 from .database import loads, row_to_dict
 from .aws_checks import fetch_published_trino_versions
 from .server import (
@@ -126,6 +127,10 @@ class OidcSettingsRequest(PayloadModel):
 
 class SessionSettingsRequest(PayloadModel):
     session_hours: int
+
+
+class ResultCacheSettingsRequest(PayloadModel):
+    result_cache_ttl_minutes: int
 
 
 class ApiTokenCreateRequest(PayloadModel):
@@ -241,6 +246,8 @@ class QueryRequest(PayloadModel):
     sql: str
     catalog: str = ""
     schema_name: str = Field(default="", alias="schema")
+    # True bypasses the result cache and always executes against the cluster.
+    fresh: bool = False
 
 
 class QueryTabCreateRequest(PayloadModel):
@@ -376,7 +383,7 @@ def create_app(
 
     api = FastAPI(
         title="TrinoHub API",
-        version="0.1.0",
+        version=__version__,
         description="Control-plane API for TrinoHub cluster, catalog, user, setup, and query workflows.",
     )
     api.state.trinohub = control
@@ -551,6 +558,19 @@ def create_app(
         actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
     ) -> dict[str, Any]:
         return control.set_session_hours(payload.payload(), actor)
+
+    @api.get("/api/query-cache", tags=["settings"])
+    def get_result_cache_settings(
+        _: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return {"result_cache_ttl_minutes": control.result_cache_ttl_minutes()}
+
+    @api.put("/api/query-cache", tags=["settings"])
+    def put_result_cache_settings(
+        payload: ResultCacheSettingsRequest,
+        actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.set_result_cache_ttl(payload.payload(), actor)
 
     @api.get("/api/security/ui-cidrs", tags=["settings"])
     def get_ui_cidr_settings(
@@ -1232,7 +1252,9 @@ def create_app(
         {
             "name": "run_query",
             "description": "Run one read-only SELECT statement on a cluster and return rows "
-            "(display-capped). Any write or DDL statement is rejected.",
+            "(display-capped). Any write or DDL statement is rejected. Identical re-runs "
+            "within the result-cache window may be served from cache (cached=true in the "
+            "response); pass fresh=true to force re-execution.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1240,6 +1262,7 @@ def create_app(
                     "sql": {"type": "string"},
                     "catalog": {"type": "string"},
                     "schema": {"type": "string"},
+                    "fresh": {"type": "boolean"},
                 },
                 "required": ["cluster_id", "sql"],
             },
