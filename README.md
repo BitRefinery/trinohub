@@ -99,16 +99,20 @@ nodes fetch signed, per-cluster bootstrap config over the private network.
 ### Query history — per-user recent runs with status, cluster, elapsed, and rows
 ![Query history](docs/images/07-query-history.png)
 
-### Users — local accounts with admin / query-user roles
+### Scheduled jobs — run SQL on a cron or interval, with run history
+![Scheduled jobs](docs/images/13-scheduled-jobs.png)
+
+### Users — local accounts, roles, and data policies
 ![Users](docs/images/08-users.png)
 
-### Settings — AWS configuration, resolved preset tiers, and OpenAPI links
+### Settings — AWS configuration, node instance types, SSO, and OpenAPI links
 ![Settings](docs/images/09-settings.png)
 
-### Sign in & dark mode
-| Sign in | Dark theme |
-|---|---|
-| ![Login](docs/images/01-login.png) | ![Dark mode](docs/images/10-clusters-dark.png) |
+### Docs — built-in guides for analysts and admins
+![Docs](docs/images/14-docs.png)
+
+### Sign in — local accounts or single sign-on
+![Sign in](docs/images/01-login.png)
 
 ---
 
