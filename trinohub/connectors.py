@@ -77,6 +77,10 @@ _CLICKHOUSE_URL = re.compile(r"jdbc:clickhouse://([^/:?\s]+)(?::\d+)?(?:/[^\s?]*
 _SQLSERVER_URL = re.compile(r"jdbc:sqlserver://([^/:;?\s]+)(?::\d+)?(?:;\S*)?")
 _ORACLE_URL = re.compile(r"jdbc:oracle:thin:@//([^/:?\s]+)(?::\d+)?/[^\s?]+")
 _SNOWFLAKE_URL = re.compile(r"jdbc:snowflake://([^/:?\s]+)(?:/[^\s?]*)?(?:\?\S*)?")
+# Trino-to-Trino: the remote coordinator host is group 1; an optional /catalog
+# (or /catalog/schema) path selects the remote catalog, and a ?SSL=true-style
+# query carries JDBC options. Credentials never live in the URL.
+_TRINO_URL = re.compile(r"jdbc:trino://([^/:?\s]+)(?::\d+)?(?:/[^\s?]*)?(?:\?\S*)?")
 # Druid speaks Avatica, so the broker host is nested inside the url= parameter
 # rather than right after the scheme. Capture that host as group 1 so the SSRF
 # guard still sees it; allow an optional trailing ;property=value list.
@@ -207,6 +211,21 @@ REGISTRY: dict[str, ConnectorType] = {
         connector_name="druid",
         url_pattern=_DRUID_URL,
         url_help="jdbc:avatica:remote:url=http://broker:8082/druid/v2/sql/avatica/",
+    ),
+    "trino": ConnectorType(
+        type="trino",
+        label="Trino (remote cluster)",
+        requires_secret=True,
+        connector_name="trino",
+        icon="cloud",
+        url_pattern=_TRINO_URL,
+        url_help="jdbc:trino://host[:port][/catalog][?SSL=true]",
+        # The Trino-to-Trino connector is not bundled in a stock Trino release; it
+        # arrives via trinodb/trino#30290. The operator uploads the connector's
+        # self-contained (shaded) plugin JAR, which nodes drop into
+        # /opt/trino/plugin/trino/ at boot — same mechanism as Oracle's driver.
+        requires_driver=True,
+        plugin_dir="trino",
     ),
     "mongodb": ConnectorType(
         type="mongodb",
@@ -351,6 +370,7 @@ _UI_DEFAULT_NAME = {
     "oracle": "warehouse_oracle",
     "snowflake": "warehouse_snowflake",
     "druid": "warehouse_druid",
+    "trino": "remote_trino",
     "mongodb": "docs_mongo",
     "elasticsearch": "logs_es",
     "opensearch": "logs_os",
