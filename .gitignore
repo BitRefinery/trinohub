@@ -6,6 +6,7 @@ __pycache__/
 *.key
 .env
 .env.*
+!.env.example
 .trinohub/
 node_modules/
 .venv/
