@@ -31,6 +31,10 @@ Trino clusters in the browser.
    - **WarehouseBucket** — your S3 bucket for Iceberg catalogs (or leave the
      placeholder and update the stack later).
    - **SshKeyName** — optional; leave blank (use Session Manager instead).
+   - **OpenRouterApiKey / OpenRouterSecretArn** — optional; enables the **Ask
+     Trino** assistant. Pass the key directly, or (recommended) a Secrets Manager
+     ARN so the key stays out of user-data. See
+     [`docs/ask-trino.md`](../../docs/ask-trino.md). Leave blank to configure later.
 4. Acknowledge "This template creates IAM resources", **Create stack**.
 5. When status is `CREATE_COMPLETE`, open the **Outputs** tab → **UiUrl**.
 

@@ -51,6 +51,29 @@ rest of TrinoHub is unaffected.
 3. **Restart the control plane** so it picks up the new environment.
 4. Open **Ask Trino** from the sidebar — it's now live.
 
+#### On an AWS (CloudFormation) deploy
+
+The stack in `deploy/aws/cloudformation.yaml` can wire the key in for you — pass
+**one** of these parameters (both optional; you can also add them later with a
+stack update):
+
+- `OpenRouterApiKey` — the key itself. Quickest, but the value is stored in the
+  instance's EC2 user-data, so anyone with `ec2:DescribeInstanceAttribute` in the
+  account can read it. Fine for trials; prefer the secret below for production.
+- `OpenRouterSecretArn` — the ARN of a Secrets Manager secret holding the key
+  (a raw string, or JSON with an `OPENROUTER_API_KEY` field). The key never
+  appears in user-data, and the stack grants the control-plane role read access
+  to exactly that secret. Takes precedence if both are set.
+
+Either way, boot writes the key to the control plane's `.env` and the assistant
+comes up enabled. To create the secret first:
+
+```bash
+aws secretsmanager create-secret --name trinohub/openrouter \
+  --secret-string sk-or-your-key-here
+# then pass its ARN as OpenRouterSecretArn
+```
+
 ### Model and provider (optional)
 
 - **Model** — the default is `openai/gpt-4o-mini`. Change it in
