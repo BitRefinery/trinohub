@@ -990,7 +990,7 @@ const DATA_CATALOG_TYPES = [
 // Connectors whose JDBC driver isn't bundled and must be uploaded by an admin.
 // Mirrors DRIVER_REQUIRED_TYPES in trinohub/connectors.py; only a pre-schema
 // fallback — renderConnectorDriverPanel prefers the server's requires_driver flag.
-const DRIVER_REQUIRED_TYPES = ["oracle", "trino"];
+const DRIVER_REQUIRED_TYPES = ["oracle", "trino", "teradata"];
 // Per-connector wording for the upload panel. Types not listed fall back to the
 // generic "unbundled JDBC driver" copy (Oracle et al).
 const DRIVER_PANEL_COPY = {
@@ -1002,6 +1002,15 @@ const DRIVER_PANEL_COPY = {
       "(shaded) plugin JAR once; cluster nodes install it into /opt/trino/plugin/trino/ " +
       "at boot. Pin a build tested against your Trino version — local↔remote " +
       "cross-version compatibility isn't guaranteed. Restart a running cluster to apply."
+  },
+  teradata: {
+    title: "Connector plugin",
+    note:
+      "Teradata isn't a stock Trino connector — it comes from the third-party " +
+      "crispkid/trino-teradata plugin, and the Teradata JDBC driver isn't " +
+      "redistributable (licensing). Build the plugin against your Trino version and " +
+      "upload the connector's self-contained (shaded) plugin JAR once; cluster nodes " +
+      "install it into /opt/trino/plugin/teradata/ at boot. Restart a running cluster to apply."
   }
 };
 let connectorDrivers = {}; // connector_type -> uploaded driver metadata
@@ -1350,7 +1359,7 @@ const CONNECTOR_NAME_BY_TYPE = {
   s3_glue: "iceberg", delta_glue: "delta_lake", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
-  snowflake: "snowflake", druid: "druid", trino: "trino", mongodb: "mongodb",
+  snowflake: "snowflake", druid: "druid", trino: "trino", teradata: "teradata", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "cassandra",
   prometheus: "prometheus",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
@@ -1360,7 +1369,7 @@ const CATALOG_GLYPH_BY_TYPE = {
   s3_glue: "iceberg", delta_glue: "delta", hive_glue: "hive", hudi_glue: "hudi",
   postgresql: "postgresql", mysql: "mysql", redshift: "redshift", sqlserver: "sqlserver",
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
-  snowflake: "snowflake", druid: "druid", trino: "database", mongodb: "mongodb",
+  snowflake: "snowflake", druid: "druid", trino: "database", teradata: "database", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "database",
   prometheus: "database",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
@@ -3035,6 +3044,7 @@ const CATALOG_TYPE_TITLES = {
   snowflake: "Snowflake catalog",
   druid: "Apache Druid catalog",
   trino: "Trino cross-cluster catalog",
+  teradata: "Teradata catalog",
   mongodb: "MongoDB catalog",
   elasticsearch: "Elasticsearch catalog",
   opensearch: "OpenSearch catalog",
@@ -3064,6 +3074,7 @@ const CATALOG_TYPE_DEFAULT_NAMES = {
   snowflake: "warehouse_snowflake",
   druid: "warehouse_druid",
   trino: "remote_trino",
+  teradata: "warehouse_teradata",
   mongodb: "docs_mongo",
   elasticsearch: "logs_es",
   opensearch: "logs_os",
