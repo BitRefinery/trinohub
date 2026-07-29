@@ -53,6 +53,18 @@ and provide a **connection URL**, **connection user**, and **password**:
 | SingleStore | `jdbc:singlestore://host:3306` |
 | Snowflake | `jdbc:snowflake://account.snowflakecomputing.com` |
 | Apache Druid | `jdbc:avatica:remote:url=http://broker:8082/druid/v2/sql/avatica/` |
+| Teradata | `jdbc:teradata://host/DATABASE=warehouse,DBS_PORT=1025` |
+
+**Teradata** is a special case among the JDBC sources: it is **not a stock Trino
+connector** — it comes from the third-party
+[crispkid/trino-teradata](https://github.com/crispkid/trino-teradata) plugin, and
+the Teradata JDBC driver itself is not redistributable (licensing). Like Oracle,
+you must upload a plugin JAR before a cluster using it can start (see
+[Uploading a connector plugin](#uploading-a-jdbc-driver-oracle) below); build the
+connector against your Trino version and upload the **self-contained (shaded)
+plugin JAR**, which nodes drop into `/opt/trino/plugin/teradata/` at boot. The
+Teradata JDBC URL carries no `:port`; the database and port arrive as trailing
+`DATABASE=…,DBS_PORT=…` parameters.
 
 ## Cross-cluster federation (Trino → Trino)
 
@@ -131,12 +143,14 @@ secret.
 ## Uploading a JDBC driver (Oracle)
 
 Some connectors ship without a bundled JAR — **Oracle** needs the vendor JDBC
-driver (not redistributable), and the **Trino** cross-cluster connector needs
-its whole plugin JAR (not yet in a stock release). When you select such a
-connector, the form shows a **JDBC driver** panel:
+driver (not redistributable), the **Trino** cross-cluster connector needs its
+whole plugin JAR (not yet in a stock release), and **Teradata** needs its
+third-party plugin JAR (also not in a stock release, and its JDBC driver isn't
+redistributable). When you select such a connector, the form shows a **JDBC
+driver** panel:
 
 - **Upload driver JAR** — upload the `.jar` (for Oracle, the vendor's
-  `ojdbc*.jar`; for Trino, the connector's shaded plugin JAR).
+  `ojdbc*.jar`; for Trino and Teradata, the connector's shaded plugin JAR).
   It's held on the control plane and its SHA-256 is recorded.
 - At boot, each cluster node downloads the driver into Trino's plugin directory
   and **verifies the SHA-256** before starting.

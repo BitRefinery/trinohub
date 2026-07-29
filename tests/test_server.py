@@ -2141,6 +2141,78 @@ class ServerModelTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 400)
         self.assertIn("jdbc:trino://", ctx.exception.message)
 
+    def test_teradata_catalog_requires_plugin_then_renders(self):
+        # Teradata (crispkid/trino-teradata) is a third-party JDBC connector whose
+        # plugin JAR is not in a stock Trino release and whose vendor JDBC driver is
+        # not redistributable. Like Oracle, a cluster using it cannot start until the
+        # plugin JAR is uploaded, and it then renders the standard JDBC
+        # connector.name=teradata block on the signed node path (never into plain
+        # user-data).
+        app = TrinoHubApp(db_path=Path(tempfile.mkdtemp()) / "t.sqlite3", aws=FakeAws(), require_setup_token=False)
+        app.secret_store = FakeSecretStore()
+        app.complete_setup(
+            {"username": "admin", "password": "correct-horse-password", "allowed_instance_types": ["r7i.2xlarge"]}
+        )
+        connection_url = "jdbc:teradata://td.example.com/DATABASE=warehouse,DBS_PORT=1025,TMODE=ANSI"
+        created = app.create_catalog(
+            {
+                "name": "warehouse_teradata",
+                "type": "teradata",
+                "config": {"connection_url": connection_url, "connection_user": "trino_reader"},
+                "password": "s3cr3t-pw",
+            }
+        )["catalog"]
+        self.assertEqual(created["config"]["connector_name"], "teradata")
+        self.assertNotIn("password", created["config"])
+        with app.conn() as conn:
+            user = dict(conn.execute("SELECT * FROM users WHERE username = 'admin'").fetchone())
+        cluster = app.create_cluster(
+            {
+                "name": "teradata-cluster",
+                "instance_type": "r7i.2xlarge",
+                "worker_mode": "fixed",
+                "min_workers": 1,
+                "max_workers": 1,
+                "catalogs": ["system", "warehouse_teradata"],
+            },
+            user,
+        )["cluster"]
+        # Starting fails fast until the connector plugin JAR is uploaded.
+        with self.assertRaises(ApiError) as ctx:
+            app.start_cluster(cluster["id"], {"confirm_billable": True})
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIn("driver uploaded", ctx.exception.message.lower())
+
+        jar = b"PK\x03\x04" + b"\x00" * 256
+        app.store_connector_driver("teradata", "trino-teradata.jar", jar, {"username": "admin"})
+        app.start_cluster(cluster["id"], {"confirm_billable": True})
+        token = app.aws.worker_template_calls[-1]["bootstrap_token"]
+        script = app.node_config_script(cluster_id=cluster["id"], role="worker", token=token, instance_type="m7i.large")
+        self.assertIn("connector.name=teradata", script)
+        self.assertIn(f"connection-url={connection_url}", script)
+        self.assertIn("connection-user=trino_reader", script)
+        self.assertIn("connection-password=s3cr3t-pw", script)
+        self.assertIn('install -d -m 0755 "/opt/trino/plugin/teradata"', script)
+        self.assertIn('--output "/opt/trino/plugin/teradata/trino-teradata.jar"', script)
+
+    def test_teradata_catalog_rejects_non_teradata_url_scheme(self):
+        # A teradata catalog only accepts jdbc:teradata:// URLs.
+        self.app.secret_store = FakeSecretStore()
+        with self.assertRaises(ApiError) as ctx:
+            self.app.create_catalog(
+                {
+                    "name": "warehouse_teradata",
+                    "type": "teradata",
+                    "config": {
+                        "connection_url": "jdbc:postgresql://db.internal.example.com:5432/warehouse",
+                        "connection_user": "trino_reader",
+                    },
+                    "password": "s3cr3t-pw",
+                }
+            )
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIn("jdbc:teradata://", ctx.exception.message)
+
     def test_node_driver_file_enforces_token_and_attachment(self):
         app = TrinoHubApp(db_path=Path(tempfile.mkdtemp()) / "t.sqlite3", aws=FakeAws(), require_setup_token=False)
         app.secret_store = FakeSecretStore()

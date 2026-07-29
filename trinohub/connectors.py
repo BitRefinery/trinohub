@@ -77,6 +77,11 @@ _CLICKHOUSE_URL = re.compile(r"jdbc:clickhouse://([^/:?\s]+)(?::\d+)?(?:/[^\s?]*
 _SQLSERVER_URL = re.compile(r"jdbc:sqlserver://([^/:;?\s]+)(?::\d+)?(?:;\S*)?")
 _ORACLE_URL = re.compile(r"jdbc:oracle:thin:@//([^/:?\s]+)(?::\d+)?/[^\s?]+")
 _SNOWFLAKE_URL = re.compile(r"jdbc:snowflake://([^/:?\s]+)(?:/[^\s?]*)?(?:\?\S*)?")
+# Teradata: the DBS host is group 1. Teradata's JDBC URL carries no :port — the
+# port and database arrive as an optional trailing /key=value,key=value list
+# (e.g. /DATABASE=warehouse,DBS_PORT=1025,TMODE=ANSI). Credentials never live
+# in the URL.
+_TERADATA_URL = re.compile(r"jdbc:teradata://([^/:?\s]+)(?:/[^\s?]*)?")
 # Trino-to-Trino: the remote coordinator host is group 1; an optional /catalog
 # (or /catalog/schema) path selects the remote catalog, and a ?SSL=true-style
 # query carries JDBC options. Credentials never live in the URL.
@@ -227,6 +232,21 @@ REGISTRY: dict[str, ConnectorType] = {
         requires_driver=True,
         plugin_dir="trino",
     ),
+    "teradata": ConnectorType(
+        type="teradata",
+        label="Teradata",
+        requires_secret=True,
+        connector_name="teradata",
+        url_pattern=_TERADATA_URL,
+        url_help="jdbc:teradata://host[/DATABASE=db,DBS_PORT=1025]",
+        # Teradata is not a stock Trino connector — it comes from the third-party
+        # crispkid/trino-teradata plugin, and the Teradata JDBC driver itself is
+        # not redistributable (licensing). Same mechanism as Oracle: the operator
+        # uploads a self-contained plugin JAR, which nodes drop into
+        # /opt/trino/plugin/teradata/ at boot.
+        requires_driver=True,
+        plugin_dir="teradata",
+    ),
     "mongodb": ConnectorType(
         type="mongodb",
         label="MongoDB",
@@ -371,6 +391,7 @@ _UI_DEFAULT_NAME = {
     "snowflake": "warehouse_snowflake",
     "druid": "warehouse_druid",
     "trino": "remote_trino",
+    "teradata": "warehouse_teradata",
     "mongodb": "docs_mongo",
     "elasticsearch": "logs_es",
     "opensearch": "logs_os",
