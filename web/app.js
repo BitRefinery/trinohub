@@ -37,7 +37,12 @@ const iconPaths = {
   "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
   "chevron-left": '<polyline points="15 18 9 12 15 6"></polyline>',
   "chevron-right": '<polyline points="9 6 15 12 9 18"></polyline>',
-  "external-link": '<path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"></path>'
+  "external-link": '<path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"></path>',
+  plug: '<path d="M9 2v6"></path><path d="M15 2v6"></path><path d="M6 8h12v3a6 6 0 0 1-12 0z"></path><path d="M12 17v5"></path>',
+  key: '<circle cx="7.5" cy="15.5" r="4.5"></circle><path d="M10.7 12.3 21 2"></path><path d="M17 6l3 3"></path>',
+  // The Scheduled jobs nav item has always asked for this one; without it the
+  // item rendered with a blank glyph.
+  clock: '<circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>'
 };
 
 const clusters = [];
@@ -3929,6 +3934,13 @@ function navigateTo(viewName) {
     loadDataSecurity();
   }
   if (viewName === "jobs") loadJobsFromApi();
+  // The MCP screen re-probes its own endpoint on every visit, so the tool list
+  // and reachability pill are never stale.
+  if (viewName === "mcp") {
+    renderMcpEndpoint();
+    renderMcpSnippet();
+    loadMcpTools();
+  }
   if (viewName === "settings") {
     loadAuditLog();
     loadSsoSettings();
@@ -10373,6 +10385,199 @@ function wireAskTrino() {
   }
 }
 
+// ===========================================================================
+// MCP tab — connection guidance for AI clients. The tool list is probed live
+// from this control plane's own /mcp endpoint (the browser session authenticates
+// it), so the screen shows what a connected client actually gets rather than a
+// hand-maintained copy that can drift from the server.
+// ===========================================================================
+const MCP_TOKEN_PLACEHOLDER = "tht_your_token_here";
+let activeMcpClient = "claude-code";
+
+function mcpEndpointUrl() {
+  return `${window.location.origin}/mcp`;
+}
+
+// The snippet per client tab. Each returns {hint, code}; the code goes through a
+// <code> block verbatim and is what the copy button yields.
+function mcpSnippet(client) {
+  const url = mcpEndpointUrl();
+  const auth = `Authorization: Bearer ${MCP_TOKEN_PLACEHOLDER}`;
+  if (client === "json") {
+    return {
+      hint:
+        "Drop this into a client that reads an mcpServers config — Claude Code's .mcp.json, " +
+        "Cursor, or VS Code. Swap in the token you created above.",
+      code: JSON.stringify(
+        {
+          mcpServers: {
+            trinohub: {
+              type: "http",
+              url,
+              headers: { Authorization: `Bearer ${MCP_TOKEN_PLACEHOLDER}` }
+            }
+          }
+        },
+        null,
+        2
+      )
+    };
+  }
+  if (client === "curl") {
+    return {
+      hint: "Check the endpoint by hand — this lists the tools without any client involved.",
+      code: [
+        `curl -sS ${url} \\`,
+        `  -H "${auth}" \\`,
+        '  -H "Content-Type: application/json" \\',
+        '  -H "Accept: application/json, text/event-stream" \\',
+        `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+      ].join("\n")
+    };
+  }
+  return {
+    hint: "Run this once; Claude Code stores the server and reconnects on every session.",
+    code: [`claude mcp add --transport http trinohub ${url} \\`, `  --header "${auth}"`].join("\n")
+  };
+}
+
+function renderMcpSnippet() {
+  const block = document.getElementById("mcpSnippet");
+  const hint = document.getElementById("mcpSnippetHint");
+  if (!block) return;
+  const snippet = mcpSnippet(activeMcpClient);
+  block.textContent = snippet.code;
+  if (hint) hint.textContent = snippet.hint;
+  document.querySelectorAll("[data-mcp-client]").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.mcpClient === activeMcpClient);
+  });
+}
+
+function renderMcpEndpoint() {
+  const fields = document.getElementById("mcpEndpointFields");
+  if (!fields) return;
+  fields.innerHTML = [
+    connectField("Endpoint URL", mcpEndpointUrl()),
+    connectField("Transport", "Streamable HTTP (JSON-RPC 2.0 over POST)"),
+    connectField("Auth header", `Authorization: Bearer ${MCP_TOKEN_PLACEHOLDER}`)
+  ].join("");
+  replaceIcons();
+}
+
+function setMcpStatus(state, text) {
+  const pill = document.getElementById("mcpStatusPill");
+  const label = document.getElementById("mcpStatusText");
+  if (label) label.textContent = text;
+  if (pill) {
+    pill.classList.remove("healthy", "warning");
+    if (state) pill.classList.add(state);
+  }
+}
+
+// Ask our own endpoint what it exposes. Uses the session cookie, so this doubles
+// as a live check that /mcp is reachable and answering.
+async function loadMcpTools() {
+  const container = document.getElementById("mcpTools");
+  if (!container) return;
+  setMcpStatus("", "Checking");
+  container.innerHTML = '<p class="instance-empty">Loading tools…</p>';
+  let tools = [];
+  try {
+    const body = await apiRequest("/mcp", {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+    });
+    tools = (body.result && body.result.tools) || [];
+  } catch (error) {
+    setMcpStatus("warning", "Unreachable");
+    container.innerHTML = `<p class="instance-empty">Could not reach the MCP endpoint: ${escapeHtml(
+      error.message
+    )}</p>`;
+    return;
+  }
+  if (!tools.length) {
+    setMcpStatus("warning", "No tools");
+    container.innerHTML = '<p class="instance-empty">The endpoint answered but exposes no tools.</p>';
+    return;
+  }
+  setMcpStatus("healthy", `Ready — ${tools.length} tool${tools.length === 1 ? "" : "s"}`);
+  container.innerHTML = tools
+    .map((tool) => {
+      const readOnly = tool.annotations && tool.annotations.readOnlyHint;
+      const badge = readOnly ? '<span class="mcp-badge">read-only</span>' : "";
+      const args = Object.keys((tool.inputSchema && tool.inputSchema.properties) || {});
+      const required = new Set((tool.inputSchema && tool.inputSchema.required) || []);
+      const argList = args.length
+        ? `<p class="mcp-tool-args">${args
+            .map(
+              (name) =>
+                `<code>${escapeHtml(name)}</code>${required.has(name) ? '<span class="mcp-req">*</span>' : ""}`
+            )
+            .join(" ")}</p>`
+        : '<p class="mcp-tool-args">No arguments.</p>';
+      return `
+        <article class="mcp-tool">
+          <header>
+            <code class="mcp-tool-name">${escapeHtml(tool.name)}</code>
+            ${badge}
+          </header>
+          <p class="mcp-tool-desc">${escapeHtml(tool.description || "")}</p>
+          ${argList}
+        </article>`;
+    })
+    .join("");
+  replaceIcons();
+}
+
+function wireMcp() {
+  const tabs = document.getElementById("mcpClientTabs");
+  if (tabs) {
+    tabs.addEventListener("click", (event) => {
+      const tab = event.target.closest("[data-mcp-client]");
+      if (!tab) return;
+      activeMcpClient = tab.dataset.mcpClient;
+      renderMcpSnippet();
+    });
+  }
+
+  const copy = document.getElementById("mcpCopySnippet");
+  if (copy) {
+    copy.addEventListener("click", () => {
+      const block = document.getElementById("mcpSnippet");
+      if (!block) return;
+      copyText(block.textContent)
+        .then(() => showToast("Copied to clipboard"))
+        .catch(() => showToast("Copy failed — select the text and copy manually"));
+    });
+  }
+
+  // The endpoint fields reuse the cluster connect-modal copy affordance.
+  const fields = document.getElementById("mcpEndpointFields");
+  if (fields) {
+    fields.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-copy-field]");
+      if (!button) return;
+      const code = button.parentElement.querySelector("code");
+      if (!code) return;
+      copyText(code.textContent)
+        .then(() => showToast("Copied to clipboard"))
+        .catch(() => showToast("Copy failed — select the text and copy manually"));
+    });
+  }
+
+  const tokensLink = document.getElementById("mcpGoToTokens");
+  if (tokensLink) {
+    tokensLink.addEventListener("click", () => {
+      navigateTo("settings");
+      const panel = document.getElementById("apiTokensPanel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
+
+  renderMcpEndpoint();
+  renderMcpSnippet();
+}
+
 function boot() {
   try {
     wireNavigation();
@@ -10388,6 +10593,7 @@ function boot() {
     wireSqlEditor();
     wireNotebooks();
     wireAskTrino();
+    wireMcp();
     wireDocs();
     wireSqlSidebars();
     wireHistoryControls();

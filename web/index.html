@@ -79,6 +79,10 @@
             <span data-icon="sparkles"></span>
             <span>Ask Trino</span>
           </button>
+          <button class="nav-item" data-view-target="mcp" type="button">
+            <span data-icon="plug"></span>
+            <span>MCP</span>
+          </button>
           <button class="nav-item" data-view-target="history" type="button">
             <span data-icon="history"></span>
             <span>Query history</span>
@@ -1054,6 +1058,123 @@ LIMIT 10;</textarea>
                     organization. Double-check the responses.
                   </p>
                 </form>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-mcp" data-title="MCP server">
+            <div class="mcp-layout">
+              <div class="panel mcp-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Endpoint</p>
+                    <h2>Connect an AI client</h2>
+                  </div>
+                  <span class="pill" id="mcpStatusPill">
+                    <span class="status-dot"></span>
+                    <span id="mcpStatusText">Checking</span>
+                  </span>
+                </div>
+                <p class="mcp-lede">
+                  TrinoHub speaks the <strong>Model Context Protocol</strong>, so Claude and other MCP
+                  hosts can browse your catalogs and run read-only queries — acting as you, under your
+                  own grants and data policies.
+                </p>
+                <div class="connect-fields" id="mcpEndpointFields"></div>
+                <p class="mcp-hint">
+                  If you have restricted access in <strong>Settings → Allowed UI CIDRs</strong>, the
+                  machine running the MCP client must fall inside that list too — the endpoint is
+                  gated by the same allowlist as the rest of the app.
+                </p>
+              </div>
+
+              <div class="panel mcp-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Step 1</p>
+                    <h2>Get an API token</h2>
+                  </div>
+                </div>
+                <p class="mcp-lede">
+                  An MCP client authenticates with a <code>tht_</code> API token and inherits the
+                  privileges of whoever owns it. Use a token for a low-privilege user or a service
+                  account if the client should only see part of your data.
+                </p>
+                <div class="mcp-actions">
+                  <button class="secondary-button admin-only" id="mcpGoToTokens" type="button">
+                    <span data-icon="key"></span> Create an API token
+                  </button>
+                  <span class="mcp-hint">Settings → API tokens. The token is shown once, at creation.</span>
+                </div>
+              </div>
+
+              <div class="panel mcp-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Step 2</p>
+                    <h2>Configure your client</h2>
+                  </div>
+                  <div class="mcp-tabs" role="tablist" id="mcpClientTabs">
+                    <button class="mcp-tab active" data-mcp-client="claude-code" type="button" role="tab">Claude Code</button>
+                    <button class="mcp-tab" data-mcp-client="json" type="button" role="tab">JSON config</button>
+                    <button class="mcp-tab" data-mcp-client="curl" type="button" role="tab">curl</button>
+                  </div>
+                </div>
+                <p class="mcp-hint" id="mcpSnippetHint"></p>
+                <div class="mcp-snippet">
+                  <pre><code id="mcpSnippet"></code></pre>
+                  <button class="ghost-button mcp-copy" id="mcpCopySnippet" type="button" title="Copy" aria-label="Copy snippet">
+                    <span data-icon="copy"></span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="panel mcp-panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Step 3</p>
+                    <h2>Available tools</h2>
+                  </div>
+                </div>
+                <p class="mcp-hint">
+                  Read live from this TrinoHub's <code>tools/list</code>, so it reflects exactly what a
+                  connected client will see. Arguments marked <span class="mcp-req">*</span> are required.
+                </p>
+                <div class="mcp-tools" id="mcpTools"></div>
+              </div>
+
+              <div class="panel mcp-panel mcp-safety">
+                <div class="panel-header">
+                  <div>
+                    <p class="eyebrow">Boundaries</p>
+                    <h2>What a client can and cannot do</h2>
+                  </div>
+                </div>
+                <ul class="mcp-bullets">
+                  <li>
+                    <span data-icon="check"></span>
+                    <span>Browse catalogs, schemas, tables, and columns on clusters you can reach.</span>
+                  </li>
+                  <li>
+                    <span data-icon="check"></span>
+                    <span>Run a single read-only <code>SELECT</code> and read the rows back, capped the
+                      same way the browser results grid is.</span>
+                  </li>
+                  <li>
+                    <span data-icon="x"></span>
+                    <span>Write, update, or delete anything — every statement passes the same read-only
+                      check as Ask Trino before it reaches Trino.</span>
+                  </li>
+                  <li>
+                    <span data-icon="x"></span>
+                    <span>See clusters, catalogs, or rows its token's owner is not granted. Row filters
+                      and column masks still apply.</span>
+                  </li>
+                  <li>
+                    <span data-icon="x"></span>
+                    <span>Manage clusters, users, or settings — no control-plane tools are exposed.</span>
+                  </li>
+                </ul>
               </div>
             </div>
           </section>

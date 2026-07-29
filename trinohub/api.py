@@ -1227,15 +1227,49 @@ def create_app(
     # the normal session/API-token layer, so tools act as the caller and
     # inherit their grants; SQL passes the validate_read_only_sql boundary.
 
-    MCP_PROTOCOL_VERSION = "2025-03-26"
+    # Version advertised when the client asks for one we do not recognise.
+    MCP_PROTOCOL_VERSION = "2025-06-18"
+    # Revisions this endpoint honours. All of them negotiate with `initialize`
+    # over Streamable HTTP; we expose only tools, so the features the later
+    # revisions add (tasks, elicitation, sampling) do not change our wire shape.
+    MCP_SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+
+    # Every tool below only reads, so hosts can skip their per-call confirmation
+    # prompts. openWorldHint is true because the data lives in Trino, not here.
+    MCP_READ_ONLY_ANNOTATIONS = {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
     MCP_TOOLS = [
         {
             "name": "list_clusters",
+            "title": "List clusters",
             "description": "List the Trino clusters you can query (id, name, status, catalogs).",
             "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "clusters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "status": {"type": "string"},
+                                "catalogs": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    }
+                },
+                "required": ["clusters"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
         },
         {
             "name": "browse_metadata",
+            "title": "Browse metadata",
             "description": "Browse catalogs, schemas, tables, and columns of a cluster. "
             "Omit catalog to list catalogs; add schema/table to drill down.",
             "inputSchema": {
@@ -1248,9 +1282,59 @@ def create_app(
                 },
                 "required": ["cluster_id"],
             },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "cluster": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "status": {"type": "string"},
+                        },
+                    },
+                    "catalogs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string"},
+                                "enabled": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "schemas": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {"name": {"type": "string"}}},
+                    },
+                    "tables": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}, "type": {"type": "string"}},
+                        },
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string"},
+                                "nullable": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "truncated": {"type": "boolean"},
+                },
+                "required": ["cluster", "catalogs", "schemas", "tables", "columns", "truncated"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
         },
         {
             "name": "run_query",
+            "title": "Run a read-only query",
             "description": "Run one read-only SELECT statement on a cluster and return rows "
             "(display-capped). Any write or DDL statement is rejected. Identical re-runs "
             "within the result-cache window may be served from cache (cached=true in the "
@@ -1266,6 +1350,22 @@ def create_app(
                 },
                 "required": ["cluster_id", "sql"],
             },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "rows": {"type": "array", "items": {"type": "array"}},
+                    "row_count": {"type": ["integer", "null"]},
+                    "truncated": {"type": "boolean"},
+                    "error": {"type": ["string", "null"]},
+                    "query_id": {"type": "integer"},
+                    "cached": {"type": "boolean"},
+                    "result_cached_at": {"type": ["string", "null"]},
+                },
+                "required": ["status", "columns", "rows", "truncated", "query_id", "cached"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
         },
     ]
 
@@ -1284,21 +1384,46 @@ def create_app(
             return control.run_readonly_sql(arguments, user)
         raise ApiError(400, f"Unknown tool: {name}")
 
+    def _mcp_error(message_id: Any, code: int, text: str, status: int) -> JSONResponse:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": text}},
+            status_code=status,
+        )
+
     @api.post("/mcp", include_in_schema=False)
     async def mcp_endpoint(request: Request) -> Response:
-        user = require_user(request)
+        try:
+            user = require_user(request)
+        except ApiError as exc:
+            if exc.status != 401:
+                raise
+            # A bare 401 leaves an MCP client with no way to learn how to
+            # authenticate, so answer with the challenge (RFC 6750 §3).
+            return JSONResponse(
+                {"error": exc.message},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="TrinoHub"'},
+            )
+
+        # From 2025-06-18 the client echoes the negotiated version on every
+        # later request. Absent means a pre-2025-06-18 client, which the spec
+        # says to treat as 2025-03-26 — one of the versions we support anyway.
+        header_version = request.headers.get("mcp-protocol-version", "")
+        if header_version and header_version not in MCP_SUPPORTED_PROTOCOL_VERSIONS:
+            return _mcp_error(
+                None,
+                -32000,
+                f"Unsupported MCP-Protocol-Version: {header_version}. "
+                f"Supported: {', '.join(MCP_SUPPORTED_PROTOCOL_VERSIONS)}.",
+                400,
+            )
+
         try:
             message = await request.json()
         except Exception:
-            return JSONResponse(
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
-                status_code=400,
-            )
+            return _mcp_error(None, -32700, "Parse error", 400)
         if not isinstance(message, dict):
-            return JSONResponse(
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Batch requests are not supported"}},
-                status_code=400,
-            )
+            return _mcp_error(None, -32600, "Batch requests are not supported", 400)
         method = message.get("method", "")
         message_id = message.get("id")
         if message_id is None:
@@ -1309,9 +1434,14 @@ def create_app(
             return JSONResponse({"jsonrpc": "2.0", "id": message_id, "result": result})
 
         if method == "initialize":
+            # Echo the client's version when we speak it, else offer our own and
+            # let the client decide whether it can continue.
+            requested = str((message.get("params") or {}).get("protocolVersion") or "")
             return reply(
                 {
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "protocolVersion": (
+                        requested if requested in MCP_SUPPORTED_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+                    ),
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "trinohub", "version": api.version},
                 }
@@ -1323,16 +1453,24 @@ def create_app(
         if method == "tools/call":
             params = message.get("params") or {}
             try:
-                result = _mcp_call_tool(
-                    str(params.get("name", "")), params.get("arguments") or {}, user
+                # run_query polls for up to ~12s; calling it inline would block
+                # the event loop — and so the whole control plane — for that long.
+                result = await run_in_threadpool(
+                    _mcp_call_tool, str(params.get("name", "")), params.get("arguments") or {}, user
                 )
-                content = [{"type": "text", "text": json.dumps(result, default=str)}]
-                return reply({"content": content, "isError": False})
+                # Every tool declares an outputSchema, so results go back as
+                # structuredContent; the text block stays for older clients.
+                payload = json.loads(json.dumps(result, default=str))
+                return reply(
+                    {
+                        "content": [{"type": "text", "text": json.dumps(payload)}],
+                        "structuredContent": payload,
+                        "isError": False,
+                    }
+                )
             except ApiError as exc:
                 return reply({"content": [{"type": "text", "text": exc.message}], "isError": True})
-        return JSONResponse(
-            {"jsonrpc": "2.0", "id": message_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
-        )
+        return _mcp_error(message_id, -32601, f"Method not found: {method}", 200)
 
     @api.get("/api/query-history", tags=["queries"])
     def list_query_history(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
