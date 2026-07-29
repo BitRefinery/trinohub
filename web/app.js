@@ -8617,11 +8617,28 @@ function wireAuth() {
   document.getElementById("logoutButton").addEventListener("click", doLogout);
 }
 
+// Show which release this control plane runs, linked to its GitHub release.
+// Operators upgrade over SSM, so "what am I running?" needs an answer that
+// doesn't involve curling the API.
+function renderAppVersion(version) {
+  const slot = document.getElementById("appVersion");
+  if (!slot) return;
+  if (!version) {
+    slot.hidden = true;
+    return;
+  }
+  slot.textContent = `v${version}`;
+  slot.href = `https://github.com/BitRefinery/trinohub/releases/tag/v${version}`;
+  slot.title = `TrinoHub v${version} — view release notes`;
+  slot.hidden = false;
+}
+
 async function initAuth() {
   let me = null;
   try {
     const result = await apiRequest("/api/me");
     me = result.user;
+    renderAppVersion(result.version);
   } catch (err) {
     // /api/me does not require auth; a failure means the API is unreachable.
   }
