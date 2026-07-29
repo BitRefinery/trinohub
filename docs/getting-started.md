@@ -24,6 +24,7 @@ The left sidebar is your main navigation. What you see depends on your role:
 - **SQL editor** — write and run SQL, view results, and export.
 - **Notebooks** — organize SQL into ordered cells with inline charts.
 - **Ask Trino** — describe what you want in plain English and get SQL to review.
+- **MCP** — connect Claude or another AI client to query your data read-only.
 - **Query history** — your recent queries and their outcomes.
 - **Scheduled jobs** — run SQL on a schedule.
 - **Docs** — this documentation.

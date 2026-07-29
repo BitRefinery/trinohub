@@ -15,6 +15,14 @@
       ]
     },
     {
+      "id": "mcp",
+      "label": "MCP",
+      "admin": false,
+      "topics": [
+        { "slug": "mcp", "title": "MCP server" }
+      ]
+    },
+    {
       "id": "admins",
       "label": "For admins",
       "admin": true,
