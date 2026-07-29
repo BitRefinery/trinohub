@@ -49,10 +49,10 @@ class AsgiClient:
         self.app = app
         self.cookie = ""
 
-    def request(self, method, path, payload=None, host="testserver"):
-        return asyncio.run(self._request(method, path, payload, host))
+    def request(self, method, path, payload=None, host="testserver", extra_headers=None):
+        return asyncio.run(self._request(method, path, payload, host, extra_headers))
 
-    async def _request(self, method, path, payload, host="testserver"):
+    async def _request(self, method, path, payload, host="testserver", extra_headers=None):
         parsed = urlparse(path)
         raw_path = parsed.path
         raw_query = parsed.query
@@ -68,6 +68,8 @@ class AsgiClient:
             headers.append((b"content-length", str(len(body)).encode("ascii")))
         if self.cookie:
             headers.append((b"cookie", self.cookie.encode("utf-8")))
+        for key, value in (extra_headers or {}).items():
+            headers.append((key.encode("latin-1"), value.encode("latin-1")))
         scope = {
             "type": "http",
             "asgi": {"version": "3.0"},
@@ -741,11 +743,12 @@ class FastApiRouteTests(unittest.TestCase):
 
 
     def test_mcp_endpoint_speaks_json_rpc(self):
-        # Unauthenticated calls are refused.
-        status, _, _ = self.client.request(
+        # Unauthenticated calls are refused, with a challenge the client can act on.
+        status, headers, _ = self.client.request(
             "POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
         )
         self.assertEqual(status, 401)
+        self.assertIn("Bearer", headers.get("www-authenticate", ""))
 
         status, _, _ = self.client.request(
             "POST",
@@ -760,6 +763,30 @@ class FastApiRouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["result"]["serverInfo"]["name"], "trinohub")
         self.assertIn("tools", body["result"]["capabilities"])
+        self.assertEqual(body["result"]["protocolVersion"], "2025-06-18")
+
+        # A version we speak is echoed back; one we don't falls back to ours.
+        for requested, expected in (("2025-03-26", "2025-03-26"), ("1999-01-01", "2025-06-18")):
+            _, _, body = self.client.request(
+                "POST",
+                "/mcp",
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": requested}},
+            )
+            self.assertEqual(body["result"]["protocolVersion"], expected)
+
+        # The negotiated version is accepted on later requests; junk is refused.
+        status, _, _ = self.client.request(
+            "POST", "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            extra_headers={"mcp-protocol-version": "2025-06-18"},
+        )
+        self.assertEqual(status, 200)
+        status, _, body = self.client.request(
+            "POST", "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            extra_headers={"mcp-protocol-version": "1999-01-01"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("Unsupported MCP-Protocol-Version", body["error"]["message"])
 
         # Notifications get a bodyless 202.
         status, _, _ = self.client.request(
@@ -770,8 +797,15 @@ class FastApiRouteTests(unittest.TestCase):
         status, _, body = self.client.request(
             "POST", "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
         )
-        names = {tool["name"] for tool in body["result"]["tools"]}
+        tools = body["result"]["tools"]
+        names = {tool["name"] for tool in tools}
         self.assertEqual(names, {"list_clusters", "browse_metadata", "run_query"})
+        # Every tool is read-only and declares its output shape, so hosts can
+        # skip confirmation prompts and consume structured results.
+        for tool in tools:
+            self.assertEqual(tool["outputSchema"]["type"], "object")
+            self.assertTrue(tool["annotations"]["readOnlyHint"])
+            self.assertFalse(tool["annotations"]["destructiveHint"])
 
         status, _, body = self.client.request(
             "POST",
@@ -782,6 +816,7 @@ class FastApiRouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(body["result"]["isError"])
         self.assertIn("clusters", body["result"]["content"][0]["text"])
+        self.assertEqual(body["result"]["structuredContent"]["clusters"], [])
 
         # Write SQL is rejected by the read-only boundary (as a tool error).
         status, _, body = self.client.request(
