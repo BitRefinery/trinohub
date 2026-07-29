@@ -614,7 +614,13 @@ def create_app(
     @api.get("/api/me", tags=["auth"])
     def me(request: Request) -> dict[str, Any]:
         user = current_user(request)
-        return {"user": control.decorate_user(user) if user else None}
+        # The version rides along on the boot call so the UI can show which
+        # release is running. Only for signed-in callers — an anonymous probe
+        # should not learn which release to match CVEs against.
+        return {
+            "user": control.decorate_user(user) if user else None,
+            "version": __version__ if user else None,
+        }
 
     @api.get("/api/aws/status", tags=["aws"])
     def aws_status(

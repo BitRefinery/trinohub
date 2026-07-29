@@ -508,6 +508,25 @@ button .icon,
   font-size: 0.72rem;
 }
 
+.sidebar-version {
+  display: block;
+  margin-top: 3px;
+  color: var(--sidebar-muted);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  opacity: 0.75;
+}
+
+.sidebar-version:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.sidebar-version[hidden] {
+  display: none;
+}
+
 /* ----------------------------------------------------------------- Topbar */
 
 .workspace {
