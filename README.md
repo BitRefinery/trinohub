@@ -53,9 +53,9 @@ nodes fetch signed, per-cluster bootstrap config over the private network.
 - **Trino-aware autoscaling** — a control loop (not a raw CPU policy) that scales workers on
   queued queries and CPU, with cooldowns and min/max bounds. **Auto-suspend** tears down idle
   clusters; a query against a suspended cluster resumes it first.
-- **Catalogs** — built-in `system`, `tpch`, `tpcds`, plus **S3 + AWS Glue (Iceberg)** data
-  sources configured by warehouse location, region, schema, and read/write intent. Worker IAM
-  roles grant S3/Glue access — **TrinoHub never stores S3 access keys.**
+- **Catalogs** — built-in `system`, `tpch`, `tpcds`, plus AWS Glue-backed lakehouse catalogs
+  on **S3, Google Cloud Storage, and Azure Data Lake**. Worker IAM roles grant S3/Glue access;
+  cross-cloud credentials live in AWS Secrets Manager and catalog records contain references only.
 - **Accelerated clusters (object-store caching)** — optional warm cache for S3-backed catalogs
   (Hive, Iceberg, Delta Lake) built on Trino's file system cache: nodes keep hot data pages on
   local NVMe instance-store SSDs and the scheduler routes work to the nodes that already hold
