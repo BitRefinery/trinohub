@@ -800,7 +800,17 @@ class FastApiRouteTests(unittest.TestCase):
         tools = body["result"]["tools"]
         names = {tool["name"] for tool in tools}
         self.assertEqual(
-            names, {"list_clusters", "browse_metadata", "run_query", "get_query_result"}
+            names,
+            {
+                "list_clusters",
+                "browse_metadata",
+                "run_query",
+                "get_query_result",
+                "list_query_templates",
+                "run_query_template",
+                "search_data_products",
+                "get_data_product",
+            },
         )
         # Every tool is read-only and declares its output shape, so hosts can
         # skip confirmation prompts and consume structured results.
@@ -858,6 +868,191 @@ class FastApiRouteTests(unittest.TestCase):
         challenge = headers.get("www-authenticate", "")
         self.assertIn("Bearer", challenge)
         self.assertIn("/.well-known/oauth-protected-resource/mcp", challenge)
+
+    def _setup_admin_with_cluster(self):
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/setup/complete",
+            {"username": "admin", "password": "correct-horse-password", "node_instance_profile": "TrinoHubNodeRole"},
+        )
+        self.assertEqual(status, 201)
+        self.client.request("PUT", "/api/instance-types", {"instance_types": ["r7i.2xlarge"]})
+        status, _, body = self.client.request(
+            "POST",
+            "/api/clusters",
+            {"name": "warehouse", "instance_type": "r7i.2xlarge", "worker_mode": "fixed",
+             "min_workers": 1, "max_workers": 1, "catalogs": ["system", "tpch"]},
+        )
+        self.assertEqual(status, 201)
+        return body["cluster"]["id"]
+
+    def test_query_templates_publish_curated_sql_as_mcp_tools(self):
+        cluster_id = self._setup_admin_with_cluster()
+
+        status, _, body = self.client.request(
+            "POST",
+            "/api/query-templates",
+            {
+                "name": "revenue_by_region",
+                "description": "Revenue for one region",
+                "sql": "SELECT region, sum(amount) FROM sales WHERE region = {{region}} LIMIT {{row_limit}}",
+                "cluster_id": cluster_id,
+                "parameters": [
+                    {"name": "region", "type": "string"},
+                    {"name": "row_limit", "type": "number", "required": False, "default": "100"},
+                ],
+            },
+        )
+        self.assertEqual(status, 201)
+        template_id = body["template"]["id"]
+        self.assertEqual(body["template"]["parameters"][0]["name"], "region")
+
+        # A template that isn't read-only once filled in is refused at save
+        # time, so an operator finds out before an agent does.
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/query-templates",
+            {"name": "bad_write", "sql": "DELETE FROM t WHERE id = {{v}}", "cluster_id": cluster_id,
+             "parameters": [{"name": "v", "type": "number"}]},
+        )
+        self.assertEqual(status, 400)
+
+        # So is one whose SQL references a parameter it never declared.
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/query-templates",
+            {"name": "undeclared", "sql": "SELECT * FROM t WHERE a = {{ghost}}", "cluster_id": cluster_id,
+             "parameters": []},
+        )
+        self.assertEqual(status, 400)
+
+        status, _, body = self.client.request(
+            "POST", "/mcp",
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "list_query_templates", "arguments": {}}},
+        )
+        self.assertEqual(
+            [t["name"] for t in body["result"]["structuredContent"]["templates"]], ["revenue_by_region"]
+        )
+
+        # A value that doesn't match its declared type never reaches the SQL.
+        status, _, body = self.client.request(
+            "POST", "/mcp",
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "run_query_template",
+                        "arguments": {"template": "revenue_by_region",
+                                      "parameters": {"region": "EU", "row_limit": "1; DROP TABLE t"}}}},
+        )
+        self.assertTrue(body["result"]["isError"])
+        self.assertIn("must be a number", body["result"]["content"][0]["text"])
+
+        # A disabled template disappears from the client's menu entirely.
+        status, _, _ = self.client.request(
+            "PATCH", f"/api/query-templates/{template_id}", {"enabled": False}
+        )
+        self.assertEqual(status, 200)
+        status, _, body = self.client.request(
+            "POST", "/mcp",
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "list_query_templates", "arguments": {}}},
+        )
+        self.assertEqual(body["result"]["structuredContent"]["templates"], [])
+
+        status, _, _ = self.client.request("DELETE", f"/api/query-templates/{template_id}")
+        self.assertEqual(status, 200)
+
+    def test_data_products_are_searchable_over_api_and_mcp(self):
+        cluster_id = self._setup_admin_with_cluster()
+
+        status, _, body = self.client.request(
+            "POST",
+            "/api/data-products",
+            {
+                "name": "Sales analytics",
+                "summary": "Revenue and refunds by day",
+                "description": "Curated sales marts.",
+                "cluster_id": cluster_id,
+                "catalog": "tpch",
+                "owner": "data-eng",
+                "tags": ["finance"],
+                "assets": [
+                    {"name": "orders", "type": "table", "description": "one row per order"},
+                    {"name": "rev_daily", "type": "view", "definition": "SELECT 1"},
+                ],
+            },
+        )
+        self.assertEqual(status, 201)
+        product_id = body["product"]["id"]
+        self.assertEqual(len(body["product"]["assets"]), 2)
+
+        status, _, body = self.client.request("GET", "/api/data-products?search=refunds")
+        self.assertEqual([p["name"] for p in body["products"]], ["Sales analytics"])
+        # Search reaches into the assets, so a product is findable by what it
+        # publishes even when its own prose never says the word.
+        status, _, body = self.client.request("GET", "/api/data-products?search=orders")
+        self.assertEqual([p["name"] for p in body["products"]], ["Sales analytics"])
+        status, _, body = self.client.request("GET", "/api/data-products?search=nothingmatches")
+        self.assertEqual(body["products"], [])
+
+        status, _, body = self.client.request(
+            "POST", "/mcp",
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "search_data_products", "arguments": {"search": "revenue"}}},
+        )
+        self.assertEqual(
+            [p["name"] for p in body["result"]["structuredContent"]["products"]], ["Sales analytics"]
+        )
+
+        for arguments in ({"name": "Sales analytics"}, {"product_id": product_id}):
+            status, _, body = self.client.request(
+                "POST", "/mcp",
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "get_data_product", "arguments": arguments}},
+            )
+            product = body["result"]["structuredContent"]["product"]
+            self.assertEqual(sorted(a["name"] for a in product["assets"]), ["orders", "rev_daily"])
+
+        status, _, body = self.client.request(
+            "POST", "/mcp",
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "get_data_product", "arguments": {}}},
+        )
+        self.assertTrue(body["result"]["isError"])
+
+        status, _, _ = self.client.request("DELETE", f"/api/data-products/{product_id}")
+        self.assertEqual(status, 200)
+        status, _, body = self.client.request("GET", "/api/data-products")
+        self.assertEqual(body["products"], [])
+
+    def test_curation_endpoints_require_the_data_products_privilege(self):
+        cluster_id = self._setup_admin_with_cluster()
+        # A role with no privileges: it may read the catalogue but not publish.
+        status, _, body = self.client.request(
+            "POST", "/api/roles", {"name": "analyst", "privileges": [], "description": "read only"}
+        )
+        self.assertEqual(status, 201)
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/users",
+            {"username": "ana", "password": "correct-horse-password", "role": "user", "roles": ["analyst"]},
+        )
+        self.assertEqual(status, 201)
+        self.client.request("POST", "/api/auth/logout")
+        status, _, _ = self.client.request(
+            "POST", "/api/auth/login", {"username": "ana", "password": "correct-horse-password"}
+        )
+        self.assertEqual(status, 200)
+
+        for method, path, payload in (
+            ("POST", "/api/data-products", {"name": "x"}),
+            ("POST", "/api/query-templates", {"name": "x", "sql": "SELECT 1", "cluster_id": cluster_id}),
+        ):
+            status, _, _ = self.client.request(method, path, payload)
+            self.assertEqual(status, 403)
+
+        # Reading the catalogue is still allowed.
+        status, _, _ = self.client.request("GET", "/api/data-products")
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

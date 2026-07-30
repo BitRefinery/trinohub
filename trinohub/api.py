@@ -25,6 +25,7 @@ from .server import (
     NOTIFICATION_EVENTS,
     PRIVILEGE_MANAGE_CATALOGS,
     PRIVILEGE_MANAGE_CLUSTERS,
+    PRIVILEGE_MANAGE_DATA_PRODUCTS,
     PRIVILEGE_MANAGE_SECURITY,
     PRIVILEGE_MANAGE_SETTINGS,
     PRIVILEGE_MANAGE_USERS,
@@ -286,6 +287,58 @@ class SavedQueryUpdateRequest(PayloadModel):
     cluster_id: int | None = None
     catalog: str | None = None
     schema_name: str | None = Field(default=None, alias="schema")
+
+
+class QueryTemplateCreateRequest(PayloadModel):
+    name: str
+    sql: str
+    cluster_id: int
+    description: str = ""
+    catalog: str = ""
+    schema_name: str = Field(default="", alias="schema")
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class QueryTemplateUpdateRequest(PayloadModel):
+    name: str | None = None
+    sql: str | None = None
+    cluster_id: int | None = None
+    description: str | None = None
+    catalog: str | None = None
+    schema_name: str | None = Field(default=None, alias="schema")
+    parameters: list[dict[str, Any]] | None = None
+    enabled: bool | None = None
+
+
+class QueryTemplateRunRequest(PayloadModel):
+    template: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    fresh: bool = False
+
+
+class DataProductCreateRequest(PayloadModel):
+    name: str
+    summary: str = ""
+    description: str = ""
+    cluster_id: int | None = None
+    catalog: str = ""
+    schema_name: str = Field(default="", alias="schema")
+    owner: str = ""
+    tags: list[str] = Field(default_factory=list)
+    assets: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DataProductUpdateRequest(PayloadModel):
+    name: str | None = None
+    summary: str | None = None
+    description: str | None = None
+    cluster_id: int | None = None
+    catalog: str | None = None
+    schema_name: str | None = Field(default=None, alias="schema")
+    owner: str | None = None
+    tags: list[str] | None = None
+    assets: list[dict[str, Any]] | None = None
 
 
 class NotebookCreateRequest(PayloadModel):
@@ -1064,6 +1117,86 @@ def create_app(
     def delete_saved_query(query_id: int, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
         return control.delete_saved_query(query_id, user)
 
+    # --- Parameterized query templates ---------------------------------------
+    # Anyone may list and run the templates their grants reach; publishing one
+    # is a curation act and needs MANAGE_DATA_PRODUCTS.
+
+    @api.get("/api/query-templates", tags=["templates"])
+    def list_query_templates(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        # Curators need to see disabled templates to re-enable them; everyone
+        # else should only see what they can actually run.
+        return control.list_query_templates(
+            user, include_disabled=control.has_privilege(user, PRIVILEGE_MANAGE_DATA_PRODUCTS)
+        )
+
+    @api.post("/api/query-templates", status_code=201, tags=["templates"])
+    def create_query_template(
+        payload: QueryTemplateCreateRequest,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.create_query_template(payload.payload(), user)
+
+    @api.patch("/api/query-templates/{template_id}", tags=["templates"])
+    def update_query_template(
+        template_id: int,
+        payload: QueryTemplateUpdateRequest,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.update_query_template(
+            template_id, payload.model_dump(by_alias=True, exclude_unset=True), user
+        )
+
+    @api.delete("/api/query-templates/{template_id}", tags=["templates"])
+    def delete_query_template(
+        template_id: int,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.delete_query_template(template_id, user)
+
+    @api.post("/api/query-templates/run", tags=["templates"])
+    async def run_query_template(
+        payload: QueryTemplateRunRequest, user: dict[str, Any] = Depends(require_user)
+    ) -> dict[str, Any]:
+        # Polls the query for up to ~12s, so it runs off the event loop for the
+        # same reason the MCP tool call does.
+        return await run_in_threadpool(control.run_query_template, payload.payload(), user)
+
+    # --- Data products --------------------------------------------------------
+
+    @api.get("/api/data-products", tags=["data-products"])
+    def list_data_products(
+        search: str = "", user: dict[str, Any] = Depends(require_user)
+    ) -> dict[str, Any]:
+        return control.list_data_products(user, search=search)
+
+    @api.get("/api/data-products/{product_id}", tags=["data-products"])
+    def get_data_product(product_id: int, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        return control.get_data_product(product_id, user)
+
+    @api.post("/api/data-products", status_code=201, tags=["data-products"])
+    def create_data_product(
+        payload: DataProductCreateRequest,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.create_data_product(payload.payload(), user)
+
+    @api.patch("/api/data-products/{product_id}", tags=["data-products"])
+    def update_data_product(
+        product_id: int,
+        payload: DataProductUpdateRequest,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.update_data_product(
+            product_id, payload.model_dump(by_alias=True, exclude_unset=True), user
+        )
+
+    @api.delete("/api/data-products/{product_id}", tags=["data-products"])
+    def delete_data_product(
+        product_id: int,
+        user: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_DATA_PRODUCTS)),
+    ) -> dict[str, Any]:
+        return control.delete_data_product(product_id, user)
+
     @api.get("/api/notebooks", tags=["notebooks"])
     def list_notebooks(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
         return control.list_notebooks(user)
@@ -1248,9 +1381,9 @@ def create_app(
         "openWorldHint": True,
     }
 
-    # run_query and get_query_result hand back the same shape, so they share one
-    # schema — a tool's declared outputSchema has to keep matching its
-    # structuredContent.
+    # run_query, get_query_result, and run_query_template all hand back the same
+    # shape, so they share one schema — a tool's declared outputSchema has to
+    # keep matching its structuredContent.
     MCP_QUERY_RESULT_SCHEMA = {
         "type": "object",
         "properties": {
@@ -1395,6 +1528,151 @@ def create_app(
             "outputSchema": MCP_QUERY_RESULT_SCHEMA,
             "annotations": MCP_READ_ONLY_ANNOTATIONS,
         },
+        {
+            "name": "list_query_templates",
+            "title": "List query templates",
+            "description": "List the curated, parameterized queries you can run. Each template "
+            "declares typed parameters; pass its name and values to run_query_template. Prefer "
+            "a template over hand-written SQL when one fits the question.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "templates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "sql": {"type": "string"},
+                                "cluster_id": {"type": ["integer", "null"]},
+                                "cluster_name": {"type": "string"},
+                                "catalog": {"type": "string"},
+                                "schema": {"type": "string"},
+                                "parameters": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "type": {"type": "string"},
+                                            "description": {"type": "string"},
+                                            "required": {"type": "boolean"},
+                                            "default": {},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    }
+                },
+                "required": ["templates"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
+        },
+        {
+            "name": "run_query_template",
+            "title": "Run a query template",
+            "description": "Run a curated query template by name, supplying its parameters as "
+            "{name: value}. Values are validated by declared type and rendered as SQL literals, "
+            "so you never write SQL yourself. Returns the same shape as run_query.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "template": {"type": "string"},
+                    "parameters": {"type": "object"},
+                    "fresh": {"type": "boolean"},
+                },
+                "required": ["template"],
+            },
+            "outputSchema": MCP_QUERY_RESULT_SCHEMA,
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
+        },
+        {
+            "name": "search_data_products",
+            "title": "Search data products",
+            "description": "Find curated data products by keyword across their names, summaries, "
+            "descriptions, tags, and the assets they publish. Start here when you need to locate "
+            "the right data for a question — products carry documentation that raw catalog "
+            "metadata does not. Omit search to list them all.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"search": {"type": "string"}},
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "products": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "owner": {"type": "string"},
+                                "cluster_id": {"type": ["integer", "null"]},
+                                "catalog": {"type": "string"},
+                                "schema": {"type": "string"},
+                                "tags": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    }
+                },
+                "required": ["products"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
+        },
+        {
+            "name": "get_data_product",
+            "title": "Get data product details",
+            "description": "Full detail for one data product, including every table and view it "
+            "publishes with their descriptions and definitions. Look one up by id or by name "
+            "after finding it with search_data_products.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "product_id": {"type": "integer"},
+                    "name": {"type": "string"},
+                },
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "description": {"type": "string"},
+                            "owner": {"type": "string"},
+                            "cluster_id": {"type": ["integer", "null"]},
+                            "catalog": {"type": "string"},
+                            "schema": {"type": "string"},
+                            "tags": {"type": "array", "items": {"type": "string"}},
+                            "assets": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "type": {"type": "string"},
+                                        "catalog": {"type": "string"},
+                                        "schema": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "definition": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                    }
+                },
+                "required": ["product"],
+            },
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
+        },
     ]
 
     def _mcp_call_tool(name: str, arguments: dict[str, Any], user: dict[str, Any]) -> Any:
@@ -1412,6 +1690,18 @@ def create_app(
             return control.run_readonly_sql(arguments, user)
         if name == "get_query_result":
             return control.readonly_query_result(arguments, user)
+        if name == "list_query_templates":
+            return control.list_query_templates(user)
+        if name == "run_query_template":
+            return control.run_query_template(arguments, user)
+        if name == "search_data_products":
+            return control.list_data_products(user, search=str(arguments.get("search") or ""))
+        if name == "get_data_product":
+            if arguments.get("product_id") is not None:
+                return control.get_data_product(int(arguments["product_id"]), user)
+            if arguments.get("name"):
+                return control.get_data_product_by_name(str(arguments["name"]), user)
+            raise ApiError(400, "Pass either product_id or name.")
         raise ApiError(400, f"Unknown tool: {name}")
 
     def _mcp_error(message_id: Any, code: int, text: str, status: int) -> JSONResponse:

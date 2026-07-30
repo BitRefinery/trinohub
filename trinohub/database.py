@@ -348,6 +348,62 @@ CREATE TABLE IF NOT EXISTS notebook_cells (
   updated_at TEXT NOT NULL
 );
 
+-- Curated SQL exposed to MCP clients as callable tools. The agent supplies
+-- parameter values only, never SQL, so a template publishes a query without
+-- publishing the ability to write one — the useful middle ground between
+-- "no SQL access" and "run whatever you like". ``parameters_json`` is a list of
+-- {name, type, description, required, default}; see server.py
+-- QUERY_TEMPLATE_PARAM_TYPES for the types and how each is rendered.
+CREATE TABLE IF NOT EXISTS query_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  sql_text TEXT NOT NULL,
+  cluster_id INTEGER REFERENCES clusters(id) ON DELETE CASCADE,
+  catalog TEXT NOT NULL DEFAULT '',
+  schema_name TEXT NOT NULL DEFAULT '',
+  parameters_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Data products: a documented bundle of tables and views that a person or an
+-- AI client can find by keyword, instead of guessing from raw catalog
+-- metadata. Reading one still goes through the normal cluster/catalog grants,
+-- so a product describes data without widening access to it.
+CREATE TABLE IF NOT EXISTS data_products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  summary TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  cluster_id INTEGER REFERENCES clusters(id) ON DELETE CASCADE,
+  catalog TEXT NOT NULL DEFAULT '',
+  schema_name TEXT NOT NULL DEFAULT '',
+  owner TEXT NOT NULL DEFAULT '',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- The tables/views a data product publishes. ``definition`` optionally carries
+-- the view SQL, so a product can document how a view is built.
+CREATE TABLE IF NOT EXISTS data_product_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES data_products(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  asset_type TEXT NOT NULL DEFAULT 'table'
+    CHECK (asset_type IN ('table', 'view', 'materialized_view')),
+  catalog TEXT NOT NULL DEFAULT '',
+  schema_name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  definition TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE (product_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS cluster_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   cluster_id INTEGER REFERENCES clusters(id) ON DELETE CASCADE,
