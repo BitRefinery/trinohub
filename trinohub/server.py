@@ -224,6 +224,26 @@ EXPLAIN_ANALYZE_REJECTION = "EXPLAIN ANALYZE executes the statement it explains,
 # Galaxy caps its hosted MCP results at 100 KB for the same reason.
 MCP_MAX_RESULT_BYTES = 100_000
 
+# --- Parameterized query templates ---------------------------------------
+# An operator publishes named SQL with typed holes; MCP clients fill the holes
+# and never see or write SQL. Values are rendered as literals after per-type
+# validation, and the finished statement still passes validate_read_only_sql —
+# a template must not become a way around the read-only boundary.
+QUERY_TEMPLATE_PARAM_TYPES = ("string", "number", "boolean", "date", "identifier")
+QUERY_TEMPLATE_PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+# Template and parameter names reach clients as tool/argument names, so they are
+# held to the same snake_case shape MCP tool names use.
+QUERY_TEMPLATE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+QUERY_TEMPLATE_PARAM_NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_]{0,63}$", re.IGNORECASE)
+# float() would accept "inf" and "nan", which are identifiers to Trino rather
+# than numbers, so numeric parameters are matched literally instead.
+QUERY_TEMPLATE_NUMBER_PATTERN = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$")
+QUERY_TEMPLATE_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+QUERY_TEMPLATE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAX_QUERY_TEMPLATE_PARAMS = 20
+MAX_DATA_PRODUCT_NAME_LENGTH = 120
+MAX_DATA_PRODUCT_ASSETS = 200
+DATA_PRODUCT_ASSET_TYPES = ("table", "view", "materialized_view")
 
 # --- RBAC ----------------------------------------------------------------
 # Coarse privileges enforced in the API layer. Each maps to an area TrinoHub
@@ -235,12 +255,18 @@ PRIVILEGE_MANAGE_CATALOGS = "MANAGE_CATALOGS"
 PRIVILEGE_MANAGE_SETTINGS = "MANAGE_SETTINGS"
 PRIVILEGE_VIEW_ALL_QUERY_HISTORY = "VIEW_ALL_QUERY_HISTORY"
 PRIVILEGE_CANCEL_ANY_QUERY = "CANCEL_ANY_QUERY"
+# Curating what agents and analysts are handed: data products and the
+# parameterized query templates published as MCP tools. Separate from
+# MANAGE_CATALOGS because connecting a data source and deciding how it is
+# described to an AI client are different jobs.
+PRIVILEGE_MANAGE_DATA_PRODUCTS = "MANAGE_DATA_PRODUCTS"
 ALL_PRIVILEGES = (
     PRIVILEGE_MANAGE_USERS,
     PRIVILEGE_MANAGE_SECURITY,
     PRIVILEGE_MANAGE_CLUSTERS,
     PRIVILEGE_MANAGE_CATALOGS,
     PRIVILEGE_MANAGE_SETTINGS,
+    PRIVILEGE_MANAGE_DATA_PRODUCTS,
     PRIVILEGE_VIEW_ALL_QUERY_HISTORY,
     PRIVILEGE_CANCEL_ANY_QUERY,
 )
@@ -548,6 +574,77 @@ def _validate_read_only_statement(statement: str, *, allow_metadata: bool) -> st
         if re.search(rf"\b{word}\b", scanned):
             raise ApiError(400, f"The generated SQL contains a disallowed keyword: {word}.")
     return statement
+
+
+def render_query_template_value(spec: dict[str, Any], raw: Any) -> str:
+    """Render one parameter value as a SQL literal, or raise ApiError(400).
+
+    Each type is validated by shape before it is rendered, so nothing a caller
+    supplies is ever pasted into the statement uninterpreted. Strings are the
+    only free-form type and are escaped and quoted; the rest must match a
+    pattern narrow enough that injection has nowhere to live.
+    """
+    name = spec.get("name", "parameter")
+    kind = str(spec.get("type") or "string").lower()
+    text = str(raw).strip() if raw is not None else ""
+
+    if kind == "number":
+        if not QUERY_TEMPLATE_NUMBER_PATTERN.fullmatch(text):
+            raise ApiError(400, f"Parameter {name} must be a number.")
+        return text
+    if kind == "boolean":
+        lowered = text.lower()
+        if lowered not in {"true", "false"}:
+            raise ApiError(400, f"Parameter {name} must be true or false.")
+        return lowered
+    if kind == "date":
+        if not QUERY_TEMPLATE_DATE_PATTERN.fullmatch(text):
+            raise ApiError(400, f"Parameter {name} must be a date formatted YYYY-MM-DD.")
+        return f"DATE '{text}'"
+    if kind == "identifier":
+        if not QUERY_TEMPLATE_IDENTIFIER_PATTERN.fullmatch(text):
+            raise ApiError(400, f"Parameter {name} must be a bare identifier (letters, digits, underscore).")
+        # Quoted so an identifier that collides with a reserved word still
+        # works. Quoting makes it case-sensitive, which is the documented
+        # behaviour of this parameter type.
+        return f'"{text}"'
+
+    literal = str(raw) if raw is not None else ""
+    if "\x00" in literal:
+        raise ApiError(400, f"Parameter {name} cannot contain a null byte.")
+    escaped = literal.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def render_query_template_sql(sql_text: str, parameters: list[dict[str, Any]], values: dict[str, Any]) -> str:
+    """Fill a template's ``{{placeholders}}`` from ``values`` and return SQL.
+
+    Callers supply values, never SQL. The result is still handed to
+    validate_read_only_sql by run_query_template — this function's escaping is
+    the first line of defence, not the only one.
+    """
+    specs = {spec["name"]: spec for spec in parameters}
+    unknown = sorted(set(values) - set(specs))
+    if unknown:
+        raise ApiError(400, f"Unknown parameter(s): {', '.join(unknown)}.")
+
+    rendered: dict[str, str] = {}
+    for name, spec in specs.items():
+        if values.get(name) is not None:
+            raw = values[name]
+        elif spec.get("required"):
+            raise ApiError(400, f"Missing required parameter: {name}.")
+        else:
+            raw = spec.get("default", "")
+        rendered[name] = render_query_template_value(spec, raw)
+
+    def substitute(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in rendered:
+            raise ApiError(400, f"The template references an undeclared parameter: {name}.")
+        return rendered[name]
+
+    return QUERY_TEMPLATE_PLACEHOLDER.sub(substitute, sql_text)
 
 
 def parse_llm_json(content: str) -> dict[str, Any]:
@@ -881,6 +978,13 @@ class TrinoHubApp:
                             "INSERT OR IGNORE INTO role_grants (role_id, grant_type, target, created_at) VALUES (?, ?, ?, ?)",
                             (role_id, grant_type, GRANT_WILDCARD, now),
                         )
+            # The INSERT above ignores an existing admin role, so a database
+            # created before a privilege was added would leave admins without
+            # it. "Full administrative access" has to keep meaning all of them.
+            conn.execute(
+                "UPDATE roles SET privileges_json = ?, updated_at = ? WHERE name = 'admin' AND is_system = 1",
+                (dumps(list(ALL_PRIVILEGES)), now),
+            )
             conn.execute(
                 """
                 INSERT OR IGNORE INTO user_roles (user_id, role_id)
@@ -3271,6 +3375,549 @@ class TrinoHubApp:
                 return kept, True
             kept.append(row)
         return kept, False
+
+    # --- Parameterized query templates --------------------------------------
+    # Curated SQL published as a callable tool. The caller supplies typed values
+    # and never SQL, so a template is how an operator hands an agent a specific
+    # question rather than the run of the warehouse.
+
+    def list_query_templates(self, user: dict[str, Any], *, include_disabled: bool = False) -> dict[str, Any]:
+        """Templates the caller can actually run.
+
+        Disabled ones and clusters the caller has no grant for are filtered out
+        unless ``include_disabled`` — for an MCP client this list doubles as the
+        menu of what it may do, so it must not advertise a call that will fail.
+        """
+        with self.conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT query_templates.*, clusters.name AS cluster_name
+                FROM query_templates
+                LEFT JOIN clusters ON clusters.id = query_templates.cluster_id
+                ORDER BY query_templates.name
+                """
+            ).fetchall()
+        templates = [
+            self.public_query_template(row)
+            for row in rows
+            if (include_disabled or row["enabled"]) and self.user_can_use_cluster(user, row["cluster_id"])
+        ]
+        return {"templates": templates}
+
+    def create_query_template(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        name = self.normalize_query_template_name(payload.get("name"))
+        sql_text = str(payload.get("sql") or payload.get("sql_text") or "").strip()
+        if not sql_text:
+            raise ApiError(400, "sql is required.")
+        parameters = self.normalize_query_template_parameters(payload.get("parameters"))
+        self.validate_query_template_sql(sql_text, parameters)
+        with self.conn() as conn:
+            cluster_id = self.normalize_query_tab_cluster_id(conn, payload.get("cluster_id"))
+            if cluster_id is None:
+                raise ApiError(400, "cluster_id is required.")
+            if conn.execute("SELECT 1 FROM query_templates WHERE name = ?", (name,)).fetchone():
+                raise ApiError(409, f"A query template named {name} already exists.")
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                INSERT INTO query_templates
+                  (name, description, sql_text, cluster_id, catalog, schema_name,
+                   parameters_json, enabled, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    str(payload.get("description") or "").strip(),
+                    sql_text,
+                    cluster_id,
+                    self.normalize_query_tab_catalog(payload.get("catalog", "")),
+                    self.normalize_query_tab_schema(payload.get("schema", payload.get("schema_name", ""))),
+                    dumps(parameters),
+                    0 if payload.get("enabled") is False else 1,
+                    user["id"],
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM query_templates WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        self.audit(user, "query_template.create", name, {"parameters": [spec["name"] for spec in parameters]})
+        return {"template": self.public_query_template(row)}
+
+    def update_query_template(self, template_id: int, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute("SELECT * FROM query_templates WHERE id = ?", (template_id,)).fetchone()
+            if not row:
+                raise ApiError(404, "Query template not found.")
+            updates: dict[str, Any] = {}
+            if "name" in payload:
+                new_name = self.normalize_query_template_name(payload["name"])
+                clash = conn.execute(
+                    "SELECT 1 FROM query_templates WHERE name = ? AND id != ?", (new_name, template_id)
+                ).fetchone()
+                if clash:
+                    raise ApiError(409, f"A query template named {new_name} already exists.")
+                updates["name"] = new_name
+            if "description" in payload:
+                updates["description"] = str(payload.get("description") or "").strip()
+            if "cluster_id" in payload:
+                cluster_id = self.normalize_query_tab_cluster_id(conn, payload.get("cluster_id"))
+                if cluster_id is None:
+                    raise ApiError(400, "cluster_id is required.")
+                updates["cluster_id"] = cluster_id
+            if "catalog" in payload:
+                updates["catalog"] = self.normalize_query_tab_catalog(payload.get("catalog", ""))
+            if "schema" in payload or "schema_name" in payload:
+                updates["schema_name"] = self.normalize_query_tab_schema(
+                    payload.get("schema", payload.get("schema_name", ""))
+                )
+            if "enabled" in payload:
+                updates["enabled"] = 1 if payload.get("enabled") else 0
+
+            # SQL and parameters are validated together — changing either alone
+            # can still invalidate the pair, so re-check against both values.
+            sql_text = str(payload.get("sql", payload.get("sql_text", row["sql_text"])) or "").strip()
+            if not sql_text:
+                raise ApiError(400, "sql is required.")
+            parameters = (
+                self.normalize_query_template_parameters(payload["parameters"])
+                if "parameters" in payload
+                else loads(row["parameters_json"], [])
+            )
+            if "sql" in payload or "sql_text" in payload or "parameters" in payload:
+                self.validate_query_template_sql(sql_text, parameters)
+                updates["sql_text"] = sql_text
+                updates["parameters_json"] = dumps(parameters)
+
+            if updates:
+                updates["updated_at"] = utc_now()
+                assignments = ", ".join(f"{column} = ?" for column in updates)
+                conn.execute(
+                    f"UPDATE query_templates SET {assignments} WHERE id = ?",
+                    [*updates.values(), template_id],
+                )
+            row = conn.execute("SELECT * FROM query_templates WHERE id = ?", (template_id,)).fetchone()
+        self.audit(user, "query_template.update", row["name"], {})
+        return {"template": self.public_query_template(row)}
+
+    def delete_query_template(self, template_id: int, user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute("SELECT * FROM query_templates WHERE id = ?", (template_id,)).fetchone()
+            if not row:
+                raise ApiError(404, "Query template not found.")
+            template = self.public_query_template(row)
+            conn.execute("DELETE FROM query_templates WHERE id = ?", (template_id,))
+        self.audit(user, "query_template.delete", template["name"], {})
+        return {"deleted": True, "template": template}
+
+    def run_query_template(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        """Fill a published template and run it as the caller.
+
+        The rendered statement still goes through validate_read_only_sql, and
+        create_query still applies the caller's cluster grant — a template
+        widens what an agent can conveniently ask for, never what it may reach.
+        """
+        name = str(payload.get("template") or payload.get("name") or "").strip()
+        if not name:
+            raise ApiError(400, "template is required.")
+        with self.conn() as conn:
+            row = conn.execute("SELECT * FROM query_templates WHERE name = ?", (name,)).fetchone()
+        if not row or not row["enabled"]:
+            raise ApiError(404, f"No enabled query template named {name}.")
+        values = payload.get("parameters") or {}
+        if not isinstance(values, dict):
+            raise ApiError(400, "parameters must be an object of {name: value}.")
+        rendered = render_query_template_sql(row["sql_text"], loads(row["parameters_json"], []), values)
+        statement = validate_read_only_sql(rendered, allow_metadata=True)
+        result = self.create_query(
+            {
+                "cluster_id": row["cluster_id"],
+                "sql": statement,
+                "catalog": row["catalog"],
+                "schema": row["schema_name"],
+                "fresh": bool(payload.get("fresh")),
+            },
+            user,
+        )
+        return self.mcp_query_result(self.poll_query_to_terminal(result["query"], user))
+
+    def normalize_query_template_name(self, value: Any) -> str:
+        name = str(value or "").strip().lower()
+        if not QUERY_TEMPLATE_NAME_PATTERN.fullmatch(name):
+            raise ApiError(
+                400,
+                "template name must be lowercase letters, digits, and underscores, "
+                "start with a letter, and be 2-64 characters.",
+            )
+        return name
+
+    def normalize_query_template_parameters(self, raw: Any) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ApiError(400, "parameters must be a list.")
+        if len(raw) > MAX_QUERY_TEMPLATE_PARAMS:
+            raise ApiError(400, f"A template can declare at most {MAX_QUERY_TEMPLATE_PARAMS} parameters.")
+        parameters: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise ApiError(400, "each parameter must be an object.")
+            name = str(entry.get("name") or "").strip()
+            if not QUERY_TEMPLATE_PARAM_NAME_PATTERN.fullmatch(name):
+                raise ApiError(400, f"Invalid parameter name: {name or '(blank)'}.")
+            if name in seen:
+                raise ApiError(400, f"Duplicate parameter: {name}.")
+            seen.add(name)
+            kind = str(entry.get("type") or "string").strip().lower()
+            if kind not in QUERY_TEMPLATE_PARAM_TYPES:
+                raise ApiError(400, f"parameter type must be one of: {', '.join(QUERY_TEMPLATE_PARAM_TYPES)}.")
+            spec = {
+                "name": name,
+                "type": kind,
+                "description": str(entry.get("description") or "").strip(),
+                "required": bool(entry.get("required", True)),
+                "default": entry.get("default", ""),
+            }
+            # An optional parameter still has to render to something, so its
+            # default has to be a valid value of its type — checked now rather
+            # than at call time, when it would surface as a confusing tool error.
+            if not spec["required"]:
+                render_query_template_value(spec, spec["default"])
+            parameters.append(spec)
+        return parameters
+
+    def validate_query_template_sql(self, sql_text: str, parameters: list[dict[str, Any]]) -> None:
+        """Reject a template whose SQL isn't read-only once filled in.
+
+        Catching this at save time means an operator finds out immediately,
+        rather than an agent discovering it as a tool error later.
+        """
+        probes = {
+            "string": "probe",
+            "number": "1",
+            "boolean": "true",
+            "date": "2000-01-01",
+            "identifier": "probe",
+        }
+        sample = {spec["name"]: probes[spec["type"]] for spec in parameters if spec.get("required")}
+        declared = {spec["name"] for spec in parameters}
+        used = {match.group(1) for match in QUERY_TEMPLATE_PLACEHOLDER.finditer(sql_text)}
+        undeclared = sorted(used - declared)
+        if undeclared:
+            raise ApiError(400, f"The SQL uses undeclared parameter(s): {', '.join(undeclared)}.")
+        validate_read_only_sql(render_query_template_sql(sql_text, parameters, sample), allow_metadata=True)
+
+    def public_query_template(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        keys = set(row.keys())
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "sql": row["sql_text"],
+            "cluster_id": row["cluster_id"],
+            "cluster_name": row["cluster_name"] if "cluster_name" in keys else "",
+            "catalog": row["catalog"],
+            "schema": row["schema_name"],
+            "parameters": loads(row["parameters_json"], []),
+            "enabled": bool(row["enabled"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    # --- Data products --------------------------------------------------------
+    # A documented bundle of tables and views, findable by keyword. This is
+    # description, not authorization: listing a product never widens what the
+    # caller can read, so products are filtered to the grants they already hold.
+
+    def list_data_products(self, user: dict[str, Any], *, search: str = "") -> dict[str, Any]:
+        terms = [term for term in str(search or "").lower().split() if term]
+        with self.conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT data_products.*, clusters.name AS cluster_name
+                FROM data_products
+                LEFT JOIN clusters ON clusters.id = data_products.cluster_id
+                ORDER BY data_products.name
+                """
+            ).fetchall()
+            products = []
+            for row in rows:
+                if not self.user_can_see_data_product(user, row):
+                    continue
+                assets = self.data_product_assets(conn, row["id"])
+                product = self.public_data_product(row, assets)
+                if terms and not self.data_product_matches(product, terms):
+                    continue
+                products.append(product)
+        return {"products": products}
+
+    def get_data_product(self, product_id: int, user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute(
+                """
+                SELECT data_products.*, clusters.name AS cluster_name
+                FROM data_products
+                LEFT JOIN clusters ON clusters.id = data_products.cluster_id
+                WHERE data_products.id = ?
+                """,
+                (product_id,),
+            ).fetchone()
+            # A product the caller has no grant for is reported as missing
+            # rather than forbidden, so the catalogue does not leak its names.
+            if not row or not self.user_can_see_data_product(user, row):
+                raise ApiError(404, "Data product not found.")
+            return {"product": self.public_data_product(row, self.data_product_assets(conn, product_id))}
+
+    def get_data_product_by_name(self, name: str, user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute("SELECT id FROM data_products WHERE name = ?", (str(name or "").strip(),)).fetchone()
+        if not row:
+            raise ApiError(404, "Data product not found.")
+        return self.get_data_product(row["id"], user)
+
+    def create_data_product(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        name = self.normalize_data_product_name(payload.get("name"))
+        assets = self.normalize_data_product_assets(payload.get("assets"))
+        with self.conn() as conn:
+            if conn.execute("SELECT 1 FROM data_products WHERE name = ?", (name,)).fetchone():
+                raise ApiError(409, f"A data product named {name} already exists.")
+            cluster_id = self.normalize_query_tab_cluster_id(conn, payload.get("cluster_id"))
+            now = utc_now()
+            cursor = conn.execute(
+                """
+                INSERT INTO data_products
+                  (name, summary, description, cluster_id, catalog, schema_name,
+                   owner, tags_json, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    str(payload.get("summary") or "").strip(),
+                    str(payload.get("description") or "").strip(),
+                    cluster_id,
+                    self.normalize_query_tab_catalog(payload.get("catalog", "")),
+                    self.normalize_query_tab_schema(payload.get("schema", payload.get("schema_name", ""))),
+                    str(payload.get("owner") or "").strip(),
+                    dumps(self.normalize_data_product_tags(payload.get("tags"))),
+                    user["id"],
+                    now,
+                    now,
+                ),
+            )
+            product_id = cursor.lastrowid
+            self.replace_data_product_assets(conn, product_id, assets)
+            row = conn.execute(
+                """
+                SELECT data_products.*, clusters.name AS cluster_name
+                FROM data_products LEFT JOIN clusters ON clusters.id = data_products.cluster_id
+                WHERE data_products.id = ?
+                """,
+                (product_id,),
+            ).fetchone()
+            product = self.public_data_product(row, self.data_product_assets(conn, product_id))
+        self.audit(user, "data_product.create", name, {"assets": len(assets)})
+        return {"product": product}
+
+    def update_data_product(self, product_id: int, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute("SELECT * FROM data_products WHERE id = ?", (product_id,)).fetchone()
+            if not row:
+                raise ApiError(404, "Data product not found.")
+            updates: dict[str, Any] = {}
+            if "name" in payload:
+                new_name = self.normalize_data_product_name(payload["name"])
+                clash = conn.execute(
+                    "SELECT 1 FROM data_products WHERE name = ? AND id != ?", (new_name, product_id)
+                ).fetchone()
+                if clash:
+                    raise ApiError(409, f"A data product named {new_name} already exists.")
+                updates["name"] = new_name
+            for field in ("summary", "description", "owner"):
+                if field in payload:
+                    updates[field] = str(payload.get(field) or "").strip()
+            if "cluster_id" in payload:
+                updates["cluster_id"] = self.normalize_query_tab_cluster_id(conn, payload.get("cluster_id"))
+            if "catalog" in payload:
+                updates["catalog"] = self.normalize_query_tab_catalog(payload.get("catalog", ""))
+            if "schema" in payload or "schema_name" in payload:
+                updates["schema_name"] = self.normalize_query_tab_schema(
+                    payload.get("schema", payload.get("schema_name", ""))
+                )
+            if "tags" in payload:
+                updates["tags_json"] = dumps(self.normalize_data_product_tags(payload.get("tags")))
+            if "assets" in payload:
+                self.replace_data_product_assets(
+                    conn, product_id, self.normalize_data_product_assets(payload.get("assets"))
+                )
+            if updates:
+                updates["updated_at"] = utc_now()
+                assignments = ", ".join(f"{column} = ?" for column in updates)
+                conn.execute(
+                    f"UPDATE data_products SET {assignments} WHERE id = ?", [*updates.values(), product_id]
+                )
+            row = conn.execute(
+                """
+                SELECT data_products.*, clusters.name AS cluster_name
+                FROM data_products LEFT JOIN clusters ON clusters.id = data_products.cluster_id
+                WHERE data_products.id = ?
+                """,
+                (product_id,),
+            ).fetchone()
+            product = self.public_data_product(row, self.data_product_assets(conn, product_id))
+        self.audit(user, "data_product.update", product["name"], {})
+        return {"product": product}
+
+    def delete_data_product(self, product_id: int, user: dict[str, Any]) -> dict[str, Any]:
+        with self.conn() as conn:
+            row = conn.execute("SELECT * FROM data_products WHERE id = ?", (product_id,)).fetchone()
+            if not row:
+                raise ApiError(404, "Data product not found.")
+            name = row["name"]
+            conn.execute("DELETE FROM data_products WHERE id = ?", (product_id,))
+        self.audit(user, "data_product.delete", name, {})
+        return {"deleted": True, "name": name}
+
+    def user_can_see_data_product(self, user: dict[str, Any], row: sqlite3.Row | dict[str, Any]) -> bool:
+        if row["cluster_id"] is not None and not self.user_can_use_cluster(user, row["cluster_id"]):
+            return False
+        return self.user_can_use_catalog(user, row["catalog"])
+
+    @staticmethod
+    def data_product_matches(product: dict[str, Any], terms: list[str]) -> bool:
+        """Every term has to appear somewhere in the product's text.
+
+        Matching spans the assets too, so "orders" finds the product that
+        publishes an orders table even when its own prose never says the word.
+        """
+        haystack = " ".join(
+            [
+                product["name"],
+                product["summary"],
+                product["description"],
+                product["owner"],
+                " ".join(product["tags"]),
+                " ".join(f"{asset['name']} {asset['description']}" for asset in product["assets"]),
+            ]
+        ).lower()
+        return all(term in haystack for term in terms)
+
+    def data_product_assets(self, conn: sqlite3.Connection, product_id: int) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT * FROM data_product_assets WHERE product_id = ? ORDER BY name", (product_id,)
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "type": row["asset_type"],
+                "catalog": row["catalog"],
+                "schema": row["schema_name"],
+                "description": row["description"],
+                "definition": row["definition"],
+            }
+            for row in rows
+        ]
+
+    def replace_data_product_assets(
+        self, conn: sqlite3.Connection, product_id: int, assets: list[dict[str, Any]]
+    ) -> None:
+        """Assets are edited as a set, so the simplest correct update is to
+        rewrite them wholesale rather than diff them."""
+        conn.execute("DELETE FROM data_product_assets WHERE product_id = ?", (product_id,))
+        now = utc_now()
+        for asset in assets:
+            conn.execute(
+                """
+                INSERT INTO data_product_assets
+                  (product_id, name, asset_type, catalog, schema_name, description, definition, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product_id,
+                    asset["name"],
+                    asset["type"],
+                    asset["catalog"],
+                    asset["schema"],
+                    asset["description"],
+                    asset["definition"],
+                    now,
+                ),
+            )
+
+    def normalize_data_product_name(self, value: Any) -> str:
+        name = str(value or "").strip()
+        if not name:
+            raise ApiError(400, "data product name is required.")
+        if any(char in name for char in "\r\n\t"):
+            raise ApiError(400, "data product name cannot contain control characters.")
+        if len(name) > MAX_DATA_PRODUCT_NAME_LENGTH:
+            raise ApiError(400, f"data product name must be {MAX_DATA_PRODUCT_NAME_LENGTH} characters or less.")
+        return name
+
+    def normalize_data_product_tags(self, raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ApiError(400, "tags must be a list of strings.")
+        tags = []
+        for entry in raw:
+            tag = str(entry or "").strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+        return tags
+
+    def normalize_data_product_assets(self, raw: Any) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ApiError(400, "assets must be a list.")
+        if len(raw) > MAX_DATA_PRODUCT_ASSETS:
+            raise ApiError(400, f"A data product can list at most {MAX_DATA_PRODUCT_ASSETS} assets.")
+        assets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise ApiError(400, "each asset must be an object.")
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                raise ApiError(400, "each asset needs a name.")
+            if name in seen:
+                raise ApiError(400, f"Duplicate asset: {name}.")
+            seen.add(name)
+            asset_type = str(entry.get("type") or "table").strip().lower()
+            if asset_type not in DATA_PRODUCT_ASSET_TYPES:
+                raise ApiError(400, f"asset type must be one of: {', '.join(DATA_PRODUCT_ASSET_TYPES)}.")
+            assets.append(
+                {
+                    "name": name,
+                    "type": asset_type,
+                    "catalog": self.normalize_query_tab_catalog(entry.get("catalog", "")),
+                    "schema": self.normalize_query_tab_schema(entry.get("schema", entry.get("schema_name", ""))),
+                    "description": str(entry.get("description") or "").strip(),
+                    "definition": str(entry.get("definition") or "").strip(),
+                }
+            )
+        return assets
+
+    def public_data_product(
+        self, row: sqlite3.Row | dict[str, Any], assets: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        keys = set(row.keys())
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "summary": row["summary"],
+            "description": row["description"],
+            "cluster_id": row["cluster_id"],
+            "cluster_name": row["cluster_name"] if "cluster_name" in keys else "",
+            "catalog": row["catalog"],
+            "schema": row["schema_name"],
+            "owner": row["owner"],
+            "tags": loads(row["tags_json"], []),
+            "assets": assets,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     # --- Query details (Phase 3) -----------------------------------------------
 

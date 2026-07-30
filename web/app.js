@@ -2003,6 +2003,468 @@ async function loadAuditLog() {
 }
 
 // --- Scheduled SQL jobs (Phase 3) --------------------------------------------
+// --- Data products and query templates -----------------------------------
+// Both are curation surfaces for what an MCP client sees: products describe
+// where the good data is, templates publish specific questions as callable
+// tools. They share the MANAGE_DATA_PRODUCTS privilege and one screen.
+let dataProducts = [];
+let queryTemplates = [];
+let dataProductSearchTerm = "";
+
+async function loadDataProductsFromApi() {
+  try {
+    const query = dataProductSearchTerm ? `?search=${encodeURIComponent(dataProductSearchTerm)}` : "";
+    const data = await apiRequest(`/api/data-products${query}`);
+    dataProducts = data.products || [];
+    renderDataProducts();
+  } catch (error) {
+    if (!/Authentication required/.test(error.message)) {
+      console.warn("Data products load failed:", error.message);
+    }
+  }
+}
+
+async function loadQueryTemplatesFromApi() {
+  try {
+    const data = await apiRequest("/api/query-templates");
+    queryTemplates = data.templates || [];
+    renderQueryTemplates();
+  } catch (error) {
+    if (!/Authentication required/.test(error.message)) {
+      console.warn("Query templates load failed:", error.message);
+    }
+  }
+}
+
+function renderDataProducts() {
+  const tbody = document.getElementById("dataProductRows");
+  if (!tbody) return;
+  if (!dataProducts.length) {
+    tbody.innerHTML = dataProductSearchTerm
+      ? '<tr><td colspan="6">No data products match that search.</td></tr>'
+      : '<tr><td colspan="6">No data products yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = dataProducts
+    .map((product, index) => {
+      const location = [product.catalog, product.schema].filter(Boolean).join(".") || "—";
+      const tags = product.tags.length
+        ? product.tags.map((tag) => `<span class="chip neutral">${escapeHtml(tag)}</span>`).join(" ")
+        : "—";
+      return `
+      <tr>
+        <td><strong>${escapeHtml(product.name)}</strong><br /><small>${escapeHtml(product.summary || "")}</small></td>
+        <td>${escapeHtml(product.cluster_name || "—")}<br /><small>${escapeHtml(location)}</small></td>
+        <td>${escapeHtml(product.owner || "—")}</td>
+        <td>${product.assets.length}</td>
+        <td>${tags}</td>
+        <td class="actions-col">
+          <button class="ghost-button" type="button" data-dp-assets="${index}">Assets</button>
+          <button class="ghost-button admin-only" type="button" data-dp-edit="${index}">Edit</button>
+          <button class="ghost-button admin-only" type="button" data-dp-delete="${index}">Delete</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+  replaceIcons();
+  applyRoleMode();
+  tbody.querySelectorAll("[data-dp-assets]").forEach((button) =>
+    button.addEventListener("click", () => showDataProductAssets(dataProducts[Number(button.dataset.dpAssets)]))
+  );
+  tbody.querySelectorAll("[data-dp-edit]").forEach((button) =>
+    button.addEventListener("click", () => editDataProductDialog(dataProducts[Number(button.dataset.dpEdit)]))
+  );
+  tbody.querySelectorAll("[data-dp-delete]").forEach((button) =>
+    button.addEventListener("click", () => deleteDataProduct(dataProducts[Number(button.dataset.dpDelete)]))
+  );
+}
+
+function showDataProductAssets(product) {
+  const panel = document.getElementById("dataProductAssetsPanel");
+  const tbody = document.getElementById("dataProductAssetRows");
+  if (!panel || !tbody) return;
+  document.getElementById("dataProductAssetsTitle").textContent = `${product.name} — assets`;
+  tbody.innerHTML = product.assets.length
+    ? product.assets
+        .map((asset) => {
+          const location = [asset.catalog || product.catalog, asset.schema || product.schema]
+            .filter(Boolean)
+            .join(".");
+          return `
+        <tr>
+          <td><code>${escapeHtml(asset.name)}</code></td>
+          <td>${escapeHtml(asset.type.replace("_", " "))}</td>
+          <td>${escapeHtml(location || "—")}</td>
+          <td>${escapeHtml(asset.description || "—")}</td>
+        </tr>`;
+        })
+        .join("")
+    : '<tr><td colspan="4">This product lists no assets yet.</td></tr>';
+  panel.hidden = false;
+}
+
+// Assets are edited as free text — one asset per line, "name: description" —
+// because the dialog helper builds flat forms and a nested asset editor would
+// be a much bigger piece of UI than the value it adds here.
+function assetsToText(assets) {
+  return assets.map((asset) => `${asset.name}: ${asset.description || ""}`.trim()).join("\n");
+}
+
+function assetsFromText(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf(":");
+      const name = separator === -1 ? line : line.slice(0, separator).trim();
+      const description = separator === -1 ? "" : line.slice(separator + 1).trim();
+      return { name, description };
+    });
+}
+
+function dataProductFields(product) {
+  const clusterOptions = [{ value: "", label: "No specific cluster" }].concat(
+    clusters.map((cluster) => ({ value: String(cluster.id), label: cluster.name }))
+  );
+  return [
+    { name: "name", label: "Name", value: product ? product.name : "", autocomplete: "off" },
+    {
+      name: "summary",
+      label: "Summary (one line — this is what search matches first)",
+      value: product ? product.summary : "",
+      autocomplete: "off",
+    },
+    {
+      name: "description",
+      label: "Description",
+      type: "textarea",
+      rows: 3,
+      value: product ? product.description : "",
+    },
+    {
+      name: "cluster_id",
+      label: "Cluster",
+      type: "select",
+      value: product && product.cluster_id ? String(product.cluster_id) : "",
+      options: clusterOptions,
+    },
+    { name: "catalog", label: "Catalog", value: product ? product.catalog : "", autocomplete: "off" },
+    { name: "schema", label: "Schema", value: product ? product.schema : "", autocomplete: "off" },
+    { name: "owner", label: "Owner", value: product ? product.owner : "", autocomplete: "off" },
+    {
+      name: "tags",
+      label: "Tags (comma separated)",
+      value: product ? product.tags.join(", ") : "",
+      autocomplete: "off",
+    },
+    {
+      name: "assets",
+      label: "Assets — one per line, as name: description",
+      type: "textarea",
+      rows: 5,
+      value: product ? assetsToText(product.assets) : "",
+    },
+  ];
+}
+
+function dataProductPayload(result) {
+  return {
+    name: result.name.trim(),
+    summary: result.summary.trim(),
+    description: result.description.trim(),
+    cluster_id: result.cluster_id ? Number(result.cluster_id) : null,
+    catalog: result.catalog.trim(),
+    schema: result.schema.trim(),
+    owner: result.owner.trim(),
+    tags: result.tags
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean),
+    assets: assetsFromText(result.assets),
+  };
+}
+
+async function createDataProductDialog() {
+  const result = await openAppDialog({
+    title: "Create data product",
+    confirmLabel: "Create",
+    fields: dataProductFields(null),
+  });
+  if (result === null) return;
+  try {
+    await apiRequest("/api/data-products", {
+      method: "POST",
+      body: JSON.stringify(dataProductPayload(result)),
+    });
+    await loadDataProductsFromApi();
+    showToast(`Data product ${result.name.trim()} created.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function editDataProductDialog(product) {
+  const result = await openAppDialog({
+    title: `Edit ${product.name}`,
+    confirmLabel: "Save",
+    fields: dataProductFields(product),
+  });
+  if (result === null) return;
+  try {
+    await apiRequest(`/api/data-products/${product.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(dataProductPayload(result)),
+    });
+    await loadDataProductsFromApi();
+    showToast(`Data product ${result.name.trim()} saved.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function deleteDataProduct(product) {
+  const confirmed = await openAppDialog({
+    title: `Delete ${product.name}?`,
+    body: "The product and its asset list are removed. The underlying tables are untouched.",
+    confirmLabel: "Delete",
+    danger: true,
+    fields: [],
+  });
+  if (confirmed === null) return;
+  try {
+    await apiRequest(`/api/data-products/${product.id}`, { method: "DELETE" });
+    document.getElementById("dataProductAssetsPanel").hidden = true;
+    await loadDataProductsFromApi();
+    showToast(`Data product ${product.name} deleted.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+function renderQueryTemplates() {
+  const tbody = document.getElementById("queryTemplateRows");
+  if (!tbody) return;
+  if (!queryTemplates.length) {
+    tbody.innerHTML = '<tr><td colspan="5">No query templates yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = queryTemplates
+    .map((template, index) => {
+      const parameters = template.parameters.length
+        ? template.parameters
+            .map(
+              (parameter) =>
+                `<code>${escapeHtml(parameter.name)}</code><small>:${escapeHtml(parameter.type)}</small>`
+            )
+            .join(", ")
+        : "none";
+      return `
+      <tr>
+        <td><strong>${escapeHtml(template.name)}</strong><br /><small>${escapeHtml(template.description || "")}</small></td>
+        <td>${escapeHtml(template.cluster_name || "—")}</td>
+        <td>${parameters}</td>
+        <td>${template.enabled ? '<span class="chip success">enabled</span>' : '<span class="chip neutral">disabled</span>'}</td>
+        <td class="actions-col">
+          <button class="ghost-button admin-only" type="button" data-qt-edit="${index}">Edit</button>
+          <button class="ghost-button admin-only" type="button" data-qt-toggle="${index}">${template.enabled ? "Disable" : "Enable"}</button>
+          <button class="ghost-button admin-only" type="button" data-qt-delete="${index}">Delete</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+  replaceIcons();
+  applyRoleMode();
+  tbody.querySelectorAll("[data-qt-edit]").forEach((button) =>
+    button.addEventListener("click", () => editQueryTemplateDialog(queryTemplates[Number(button.dataset.qtEdit)]))
+  );
+  tbody.querySelectorAll("[data-qt-toggle]").forEach((button) =>
+    button.addEventListener("click", () => toggleQueryTemplate(queryTemplates[Number(button.dataset.qtToggle)]))
+  );
+  tbody.querySelectorAll("[data-qt-delete]").forEach((button) =>
+    button.addEventListener("click", () => deleteQueryTemplate(queryTemplates[Number(button.dataset.qtDelete)]))
+  );
+}
+
+// Parameters are entered one per line as "name type required description", so
+// the whole template fits in the flat dialog form.
+function parametersToText(parameters) {
+  return parameters
+    .map((parameter) => {
+      const required = parameter.required ? "required" : `optional=${parameter.default}`;
+      return `${parameter.name} ${parameter.type} ${required} ${parameter.description || ""}`.trim();
+    })
+    .join("\n");
+}
+
+function parametersFromText(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, type = "string", flag = "required", ...rest] = line.split(/\s+/);
+      const optional = flag.startsWith("optional");
+      return {
+        name,
+        type,
+        required: !optional,
+        default: optional ? flag.slice("optional=".length) : "",
+        description: rest.join(" "),
+      };
+    });
+}
+
+function queryTemplateFields(template) {
+  return [
+    {
+      name: "name",
+      label: "Tool name (lowercase, underscores — this is what clients call)",
+      value: template ? template.name : "",
+      autocomplete: "off",
+    },
+    {
+      name: "description",
+      label: "Description (tells the model when to use this template)",
+      value: template ? template.description : "",
+      autocomplete: "off",
+    },
+    {
+      name: "sql",
+      label: "SQL — write parameters as {{name}}",
+      type: "textarea",
+      rows: 5,
+      value: template ? template.sql : "",
+    },
+    {
+      name: "cluster_id",
+      label: "Cluster",
+      type: "select",
+      value: template && template.cluster_id ? String(template.cluster_id) : clusters.length ? String(clusters[0].id) : "",
+      options: clusters.map((cluster) => ({ value: String(cluster.id), label: cluster.name })),
+    },
+    { name: "catalog", label: "Catalog", value: template ? template.catalog : "", autocomplete: "off" },
+    { name: "schema", label: "Schema", value: template ? template.schema : "", autocomplete: "off" },
+    {
+      name: "parameters",
+      label: "Parameters — one per line: name type required|optional=default description",
+      type: "textarea",
+      rows: 4,
+      value: template ? parametersToText(template.parameters) : "",
+    },
+  ];
+}
+
+function queryTemplatePayload(result) {
+  return {
+    name: result.name.trim(),
+    description: result.description.trim(),
+    sql: result.sql.trim(),
+    cluster_id: Number(result.cluster_id),
+    catalog: result.catalog.trim(),
+    schema: result.schema.trim(),
+    parameters: parametersFromText(result.parameters),
+  };
+}
+
+async function createQueryTemplateDialog() {
+  if (!clusters.length) {
+    showToast("Create a cluster first — a template runs against one.", { type: "error" });
+    return;
+  }
+  const result = await openAppDialog({
+    title: "Create query template",
+    confirmLabel: "Create",
+    fields: queryTemplateFields(null),
+  });
+  if (result === null) return;
+  try {
+    await apiRequest("/api/query-templates", {
+      method: "POST",
+      body: JSON.stringify(queryTemplatePayload(result)),
+    });
+    await loadQueryTemplatesFromApi();
+    showToast(`Template ${result.name.trim()} published.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function editQueryTemplateDialog(template) {
+  const result = await openAppDialog({
+    title: `Edit ${template.name}`,
+    confirmLabel: "Save",
+    fields: queryTemplateFields(template),
+  });
+  if (result === null) return;
+  try {
+    await apiRequest(`/api/query-templates/${template.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(queryTemplatePayload(result)),
+    });
+    await loadQueryTemplatesFromApi();
+    showToast(`Template ${result.name.trim()} saved.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function toggleQueryTemplate(template) {
+  try {
+    await apiRequest(`/api/query-templates/${template.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: !template.enabled }),
+    });
+    await loadQueryTemplatesFromApi();
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function deleteQueryTemplate(template) {
+  const confirmed = await openAppDialog({
+    title: `Delete ${template.name}?`,
+    body: "MCP clients will stop seeing this tool immediately.",
+    confirmLabel: "Delete",
+    danger: true,
+    fields: [],
+  });
+  if (confirmed === null) return;
+  try {
+    await apiRequest(`/api/query-templates/${template.id}`, { method: "DELETE" });
+    await loadQueryTemplatesFromApi();
+    showToast(`Template ${template.name} deleted.`, { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+function wireDataProducts() {
+  const createProduct = document.getElementById("openCreateDataProduct");
+  if (createProduct) createProduct.addEventListener("click", () => createDataProductDialog());
+  const createTemplate = document.getElementById("openCreateQueryTemplate");
+  if (createTemplate) createTemplate.addEventListener("click", () => createQueryTemplateDialog());
+  const closeAssets = document.getElementById("closeDataProductAssets");
+  if (closeAssets) {
+    closeAssets.addEventListener("click", () => {
+      document.getElementById("dataProductAssetsPanel").hidden = true;
+    });
+  }
+  const search = document.getElementById("dataProductSearch");
+  if (search) {
+    // Search runs server-side so it matches what an MCP client's
+    // search_data_products call would return, not a different client-side rule.
+    let timer = null;
+    search.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        dataProductSearchTerm = search.value.trim();
+        loadDataProductsFromApi();
+      }, 200);
+    });
+  }
+}
+
 let scheduledJobs = [];
 
 async function loadJobsFromApi() {
@@ -3934,6 +4396,10 @@ function navigateTo(viewName) {
     loadDataSecurity();
   }
   if (viewName === "jobs") loadJobsFromApi();
+  if (viewName === "data-products") {
+    loadDataProductsFromApi();
+    loadQueryTemplatesFromApi();
+  }
   // The MCP screen re-probes its own endpoint on every visit, so the tool list
   // and reachability pill are never stale.
   if (viewName === "mcp") {
@@ -10620,6 +11086,7 @@ function boot() {
     wireRoleSwitcher();
     wireAppDialog();
     wireJobs();
+    wireDataProducts();
     wireGlobalSearch();
     wireAuth();
     renderClusters();

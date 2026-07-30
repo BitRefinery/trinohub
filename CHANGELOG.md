@@ -12,6 +12,20 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Added
 
+- **Data products.** A curated, documented bundle of tables and views with an
+  owner, tags, and per-asset descriptions, managed from a new **Data products**
+  nav view. AI clients find them by keyword through the `search_data_products`
+  and `get_data_product` MCP tools, which is how an agent locates the right data
+  instead of guessing from raw catalog metadata. Publishing a product describes
+  data — it never widens who can read it, and products the caller has no
+  cluster or catalog grant for are not listed.
+- **Parameterized query templates.** An operator publishes named SQL with typed
+  `{{placeholders}}`; MCP clients call it through `list_query_templates` /
+  `run_query_template` supplying values only, never SQL. Values are validated by
+  declared type (`string`, `number`, `boolean`, `date`, `identifier`) and
+  rendered as escaped literals, and the finished statement still passes the
+  read-only check. A template whose SQL isn't read-only once filled in is
+  rejected when it is saved, not when an agent calls it.
 - **`get_query_result` MCP tool.** `run_query` stops polling after ~12s and
   returns `status: "running"` with a `query_id`; that id can now be redeemed to
   keep waiting, instead of stranding the caller.
@@ -21,6 +35,9 @@ Anything landing on `main` between releases goes under **Unreleased**.
   pointing at it. Clients that discover authentication rather than accept a
   pasted token can connect; the configured SSO issuer is advertised as the
   authorization server.
+- **`MANAGE_DATA_PRODUCTS` privilege**, gating both curation surfaces above.
+  The seeded `admin` role is now kept in sync with the full privilege list, so a
+  database created before a privilege existed picks it up on startup.
 - This changelog, backfilled to the first tagged release. Its section for a tag
   is published as that GitHub Release's body, so release notes are written once
   rather than auto-generated from PR titles.
