@@ -211,6 +211,20 @@ ASK_TRINO_SQL_DENYLIST = (
     "exec", "execute", "set", "reset", "use", "prepare", "deallocate",
 )
 
+# Statement kinds beyond SELECT that MCP clients may run (see
+# validate_read_only_sql's ``allow_metadata``). These read catalog metadata and
+# mutate nothing, so the SELECT denylist above does not apply to them — it would
+# reject SHOW CREATE TABLE on the word "create", which is a read.
+READ_ONLY_METADATA_KEYWORDS = ("show", "describe", "desc")
+EXPLAIN_ANALYZE_REJECTION = "EXPLAIN ANALYZE executes the statement it explains, so it is not allowed."
+
+# --- MCP -----------------------------------------------------------------
+# Tool results are read into a model's context, not rendered in a table, so the
+# MCP surface caps far tighter than the browser's 1,000 rows / 10 MB. Starburst
+# Galaxy caps its hosted MCP results at 100 KB for the same reason.
+MCP_MAX_RESULT_BYTES = 100_000
+
+
 # --- RBAC ----------------------------------------------------------------
 # Coarse privileges enforced in the API layer. Each maps to an area TrinoHub
 # previously gated on the binary admin bit; roles carry a set of them.
@@ -474,23 +488,61 @@ def query_cache_key(
     return token_hash(material)
 
 
-def validate_read_only_sql(sql_text: str) -> str:
+def validate_read_only_sql(sql_text: str, *, allow_metadata: bool = False) -> str:
     """Return a single, validated read-only statement or raise ApiError(400).
 
-    Enforces: non-empty, exactly one statement, starts with SELECT/WITH, and no
-    denylisted keyword. This is the safety boundary around LLM-generated SQL.
+    Enforces: non-empty, exactly one statement, an allowed leading keyword, and
+    no denylisted keyword. This is the safety boundary around LLM-generated SQL
+    and around every statement an MCP client submits.
+
+    ``allow_metadata`` additionally accepts SHOW/DESCRIBE/EXPLAIN, which MCP
+    clients need for schema discovery and plan inspection. Ask Trino leaves it
+    off and stays SELECT-only, so the model can still only ever emit a query.
     """
     text = (sql_text or "").strip().rstrip(";").strip()
     if not text:
-        raise ApiError(400, "The assistant did not return any SQL to run.")
+        raise ApiError(400, "No SQL statement was provided.")
     statements = split_sql_statements(text)
     if len(statements) != 1:
         raise ApiError(400, "Only one read-only SQL statement can run per question.")
-    statement = statements[0]
+    return _validate_read_only_statement(statements[0], allow_metadata=allow_metadata)
+
+
+def _validate_read_only_statement(statement: str, *, allow_metadata: bool) -> str:
     keyword_match = re.match(r"\s*([a-zA-Z]+)", statement)
     keyword = (keyword_match.group(1) if keyword_match else "").lower()
+
+    if allow_metadata and keyword == "explain":
+        # EXPLAIN is only as safe as the statement behind it: plain EXPLAIN
+        # plans without executing, but EXPLAIN ANALYZE runs the thing. So
+        # reject ANALYZE explicitly and re-validate the tail, which stops a
+        # write from riding in behind the keyword.
+        remainder = statement[keyword_match.end() :].lstrip()
+        options = re.match(r"\(([^)]*)\)", remainder)
+        if options:
+            if re.search(r"\banalyze\b", options.group(1), re.IGNORECASE):
+                raise ApiError(400, EXPLAIN_ANALYZE_REJECTION)
+            remainder = remainder[options.end() :].lstrip()
+        if re.match(r"analyze\b", remainder, re.IGNORECASE):
+            raise ApiError(400, EXPLAIN_ANALYZE_REJECTION)
+        if not remainder:
+            raise ApiError(400, "EXPLAIN needs a statement to explain.")
+        _validate_read_only_statement(remainder, allow_metadata=allow_metadata)
+        return statement
+
+    if allow_metadata and keyword in READ_ONLY_METADATA_KEYWORDS:
+        # SHOW/DESCRIBE only read metadata, and the single-statement check above
+        # already rules out a smuggled second statement. The SELECT denylist
+        # would misfire here anyway — SHOW CREATE TABLE is a read, not a DDL.
+        return statement
+
     if keyword not in {"select", "with"}:
-        raise ApiError(400, "Only read-only SELECT queries are allowed.")
+        raise ApiError(
+            400,
+            "Only read-only SELECT, SHOW, DESCRIBE, and EXPLAIN statements are allowed."
+            if allow_metadata
+            else "Only read-only SELECT queries are allowed.",
+        )
     scanned = mask_sql_for_scanning(statement).lower()
     for word in ASK_TRINO_SQL_DENYLIST:
         if re.search(rf"\b{word}\b", scanned):
@@ -1513,6 +1565,39 @@ class TrinoHubApp:
         config = self.oidc_settings()
         base = (config.get("redirect_base") or request_base).rstrip("/")
         return f"{base}/api/auth/oidc/callback"
+
+    def mcp_resource_base(self, request_base: str) -> str:
+        """The externally reachable origin for MCP discovery URLs.
+
+        Behind a proxy ``request.base_url`` is the internal address, which would
+        send a client somewhere it cannot reach; the SSO redirect_base is
+        already the operator's statement of the public origin, so reuse it.
+        """
+        config = self.oidc_settings()
+        return (config.get("redirect_base") or request_base).rstrip("/")
+
+    def mcp_protected_resource_metadata(self, request_base: str) -> dict[str, Any]:
+        """RFC 9728 metadata for the /mcp endpoint.
+
+        Without this a client meeting a 401 has no way to learn *how* to
+        authenticate, which is why MCP hosts that only speak OAuth cannot
+        connect to a bearer-token-only server. When SSO is configured we point
+        at that issuer as the authorization server; otherwise we still describe
+        the resource so a client can at least report what it needs.
+        """
+        base = self.mcp_resource_base(request_base)
+        config = self.oidc_settings()
+        metadata: dict[str, Any] = {
+            "resource": f"{base}/mcp",
+            "resource_name": "TrinoHub MCP",
+            "bearer_methods_supported": ["header"],
+            # The MCP nav view is app state rather than its own URL, so the best
+            # we can point a client at is the app itself.
+            "resource_documentation": base or "/",
+        }
+        if self.oidc_enabled():
+            metadata["authorization_servers"] = [str(config.get("issuer", "")).rstrip("/")]
+        return metadata
 
     @staticmethod
     def _decode_jwt_claims(id_token: str) -> dict[str, Any]:
@@ -3109,10 +3194,11 @@ class TrinoHubApp:
     # --- MCP server (Phase 7 differentiator) --------------------------------------
 
     def run_readonly_sql(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
-        """Run one SELECT through the normal query path and poll it to a
-        terminal state. The same validate_read_only_sql boundary as Ask Trino:
-        callers (MCP clients) can never mutate data."""
-        sql_text = validate_read_only_sql(str(payload.get("sql") or ""))
+        """Run one read-only statement through the normal query path and poll it
+        toward a terminal state. The same validate_read_only_sql boundary as Ask
+        Trino, widened to SHOW/DESCRIBE/EXPLAIN: callers (MCP clients) can read
+        metadata and plans, but can never mutate data."""
+        sql_text = validate_read_only_sql(str(payload.get("sql") or ""), allow_metadata=True)
         result = self.create_query(
             {
                 "cluster_id": payload.get("cluster_id"),
@@ -3123,18 +3209,48 @@ class TrinoHubApp:
             },
             user,
         )
-        query = result["query"]
+        return self.mcp_query_result(self.poll_query_to_terminal(result["query"], user))
+
+    def readonly_query_result(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        """Pick a query back up by id and keep polling it.
+
+        ``run_readonly_sql`` gives up after ASK_TRINO_MAX_POLLS so a slow query
+        cannot pin an MCP request open indefinitely. Without this an agent would
+        be stranded holding a query_id it had no way to redeem, so every
+        ``status: "running"`` result is resumable here.
+        """
+        try:
+            query_id = int(payload.get("query_id"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "query_id is required.") from None
+        # get_query runs the normal access check, so a caller cannot redeem a
+        # query id belonging to someone else.
+        query = self.get_query(query_id, user)["query"]
+        return self.mcp_query_result(self.poll_query_to_terminal(query, user))
+
+    def poll_query_to_terminal(self, query: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
         polls = 0
         while query["status"] not in TERMINAL_QUERY_STATUSES and polls < ASK_TRINO_MAX_POLLS:
             polls += 1
             time.sleep(0.4)
             query = self.advance_query_run(query["id"], user, max_pages=5)["query"]
+        return query
+
+    def mcp_query_result(self, query: dict[str, Any]) -> dict[str, Any]:
+        """Shape a query run for an MCP client, trimmed to fit a context window.
+
+        The browser caps exist to keep a table renderable; this one exists to
+        keep a tool result affordable to read. 10 MB of JSON would swamp any
+        client's context long before it became useful, so rows are dropped until
+        the payload fits MCP_MAX_RESULT_BYTES and the trim is reported.
+        """
+        rows, byte_truncated = self.trim_rows_to_budget(query.get("data") or [])
         return {
             "status": query["status"],
             "columns": [column.get("name") for column in query.get("columns") or []],
-            "rows": query.get("data") or [],
+            "rows": rows,
             "row_count": query.get("row_count"),
-            "truncated": bool(query.get("truncated")),
+            "truncated": bool(query.get("truncated")) or byte_truncated,
             "error": query.get("error_message") or None,
             "query_id": query["id"],
             # Callers polling for change need to know a result was served from
@@ -3142,6 +3258,19 @@ class TrinoHubApp:
             "cached": bool(query.get("cache_hit")),
             "result_cached_at": query.get("result_cached_at") or None,
         }
+
+    def trim_rows_to_budget(self, rows: list[Any]) -> tuple[list[Any], bool]:
+        """Return the leading rows that fit MCP_MAX_RESULT_BYTES, plus whether
+        anything was dropped. Measured per row so one enormous row cannot
+        smuggle the whole budget past the check."""
+        kept: list[Any] = []
+        used = 0
+        for row in rows:
+            used += len(json.dumps(row, default=str).encode("utf-8"))
+            if used > MCP_MAX_RESULT_BYTES:
+                return kept, True
+            kept.append(row)
+        return kept, False
 
     # --- Query details (Phase 3) -----------------------------------------------
 

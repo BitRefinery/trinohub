@@ -4718,6 +4718,44 @@ class AskTrinoSqlGuardTests(unittest.TestCase):
         statement = "SELECT name FROM t WHERE note = 'please delete this row'"
         self.assertEqual(validate_read_only_sql(statement), statement)
 
+    def test_metadata_statements_need_the_mcp_opt_in(self):
+        from trinohub.server import validate_read_only_sql
+
+        # Ask Trino stays SELECT-only: widening the boundary for MCP must not
+        # widen what the model is allowed to emit.
+        for statement in ["SHOW SCHEMAS FROM hive", "DESCRIBE hive.s.t", "EXPLAIN SELECT 1"]:
+            with self.assertRaises(ApiError):
+                validate_read_only_sql(statement)
+            self.assertEqual(
+                validate_read_only_sql(statement, allow_metadata=True), statement
+            )
+
+    def test_metadata_opt_in_still_rejects_writes_and_explain_analyze(self):
+        from trinohub.server import validate_read_only_sql
+
+        for bad in [
+            "DROP TABLE t",
+            "INSERT INTO t VALUES (1)",
+            # EXPLAIN plans without running, but EXPLAIN ANALYZE executes — and
+            # EXPLAIN cannot be used to smuggle a write past the check either.
+            "EXPLAIN ANALYZE SELECT 1",
+            "EXPLAIN (TYPE IO, ANALYZE) SELECT 1",
+            "EXPLAIN INSERT INTO t VALUES (1)",
+            "EXPLAIN",
+            "SHOW TABLES; DROP TABLE t",
+        ]:
+            with self.assertRaises(ApiError) as ctx:
+                validate_read_only_sql(bad, allow_metadata=True)
+            self.assertEqual(ctx.exception.status, 400)
+
+    def test_show_create_table_survives_the_select_denylist(self):
+        from trinohub.server import validate_read_only_sql
+
+        # "create" is denylisted for SELECT statements, but SHOW CREATE TABLE is
+        # a read — the denylist must not be applied to metadata statements.
+        statement = "SHOW CREATE TABLE hive.s.t"
+        self.assertEqual(validate_read_only_sql(statement, allow_metadata=True), statement)
+
     def test_parse_llm_json_handles_markdown_wrapped_and_fallback(self):
         from trinohub.server import parse_llm_json
 

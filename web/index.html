@@ -1093,6 +1093,12 @@ LIMIT 10;</textarea>
                   machine running the MCP client must fall inside that list too — the endpoint is
                   gated by the same allowlist as the rest of the app.
                 </p>
+                <p class="mcp-hint">
+                  Clients that discover authentication rather than take a pasted token can read
+                  <code>/.well-known/oauth-protected-resource</code>, which an unauthenticated call is
+                  pointed at. It advertises your configured SSO issuer as the authorization server,
+                  so set up <strong>Settings → SSO</strong> if you want OAuth-only hosts to connect.
+                </p>
               </div>
 
               <div class="panel mcp-panel">
@@ -1164,13 +1170,15 @@ LIMIT 10;</textarea>
                   </li>
                   <li>
                     <span data-icon="check"></span>
-                    <span>Run a single read-only <code>SELECT</code> and read the rows back, capped the
-                      same way the browser results grid is.</span>
+                    <span>Run a single read-only <code>SELECT</code>, <code>SHOW</code>,
+                      <code>DESCRIBE</code>, or <code>EXPLAIN</code> and read the rows back, capped to
+                      100 KB so a result cannot swamp the model's context.</span>
                   </li>
                   <li>
                     <span data-icon="x"></span>
                     <span>Write, update, or delete anything — every statement passes the same read-only
-                      check as Ask Trino before it reaches Trino.</span>
+                      check as Ask Trino before it reaches Trino, and
+                      <code>EXPLAIN ANALYZE</code> is refused because it executes what it explains.</span>
                   </li>
                   <li>
                     <span data-icon="x"></span>
