@@ -12,12 +12,33 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Added
 
+- **`get_query_result` MCP tool.** `run_query` stops polling after ~12s and
+  returns `status: "running"` with a `query_id`; that id can now be redeemed to
+  keep waiting, instead of stranding the caller.
+- **OAuth discovery for MCP.** The server publishes RFC 9728 metadata at
+  `/.well-known/oauth-protected-resource` (and the `/mcp`-suffixed form), and an
+  unauthenticated `/mcp` call now answers with a `WWW-Authenticate` challenge
+  pointing at it. Clients that discover authentication rather than accept a
+  pasted token can connect; the configured SSO issuer is advertised as the
+  authorization server.
 - This changelog, backfilled to the first tagged release. Its section for a tag
   is published as that GitHub Release's body, so release notes are written once
   rather than auto-generated from PR titles.
 - The running version is shown in the sidebar, linked to its release.
 - A test asserts the CloudFormation `GitRef` default matches the package
   version, so the two cannot drift apart unnoticed.
+
+### Changed
+
+- **MCP clients can run `SHOW`, `DESCRIBE`, and `EXPLAIN`,** not only `SELECT`,
+  which is what makes schema discovery and query-plan inspection possible.
+  `EXPLAIN ANALYZE` stays refused because it executes the statement it explains,
+  and `EXPLAIN` re-validates whatever follows it so a write cannot ride in
+  behind the keyword. Ask Trino is unchanged and remains `SELECT`-only.
+- **MCP query results are capped at 100 KB**, separately from the browser's
+  1,000-row / 10 MB display cap. A tool result is read into a model's context
+  rather than rendered in a table, so the old cap could swamp a client long
+  before the data became useful. Trimmed results still report `truncated: true`.
 
 ## [0.3.0] - 2026-07-29
 

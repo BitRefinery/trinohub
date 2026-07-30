@@ -1247,6 +1247,25 @@ def create_app(
         "destructiveHint": False,
         "openWorldHint": True,
     }
+
+    # run_query and get_query_result hand back the same shape, so they share one
+    # schema — a tool's declared outputSchema has to keep matching its
+    # structuredContent.
+    MCP_QUERY_RESULT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "rows": {"type": "array", "items": {"type": "array"}},
+            "row_count": {"type": ["integer", "null"]},
+            "truncated": {"type": "boolean"},
+            "error": {"type": ["string", "null"]},
+            "query_id": {"type": "integer"},
+            "cached": {"type": "boolean"},
+            "result_cached_at": {"type": ["string", "null"]},
+        },
+        "required": ["status", "columns", "rows", "truncated", "query_id", "cached"],
+    }
     MCP_TOOLS = [
         {
             "name": "list_clusters",
@@ -1341,10 +1360,13 @@ def create_app(
         {
             "name": "run_query",
             "title": "Run a read-only query",
-            "description": "Run one read-only SELECT statement on a cluster and return rows "
-            "(display-capped). Any write or DDL statement is rejected. Identical re-runs "
-            "within the result-cache window may be served from cache (cached=true in the "
-            "response); pass fresh=true to force re-execution.",
+            "description": "Run one read-only statement on a cluster and return rows. "
+            "SELECT, SHOW, DESCRIBE, and EXPLAIN are allowed; any write, DDL, or "
+            "EXPLAIN ANALYZE statement is rejected. Results are capped to fit a context "
+            "window (truncated=true when rows were dropped). A slow query returns "
+            "status='running' with a query_id — pass that to get_query_result to keep "
+            "waiting. Identical re-runs within the result-cache window may be served from "
+            "cache (cached=true in the response); pass fresh=true to force re-execution.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1356,21 +1378,21 @@ def create_app(
                 },
                 "required": ["cluster_id", "sql"],
             },
-            "outputSchema": {
+            "outputSchema": MCP_QUERY_RESULT_SCHEMA,
+            "annotations": MCP_READ_ONLY_ANNOTATIONS,
+        },
+        {
+            "name": "get_query_result",
+            "title": "Get a query result",
+            "description": "Fetch the current result of a query started by run_query, waiting "
+            "a little longer for it to finish. Call this when run_query came back with "
+            "status='running'; repeat until status is no longer 'running'.",
+            "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "columns": {"type": "array", "items": {"type": "string"}},
-                    "rows": {"type": "array", "items": {"type": "array"}},
-                    "row_count": {"type": ["integer", "null"]},
-                    "truncated": {"type": "boolean"},
-                    "error": {"type": ["string", "null"]},
-                    "query_id": {"type": "integer"},
-                    "cached": {"type": "boolean"},
-                    "result_cached_at": {"type": ["string", "null"]},
-                },
-                "required": ["status", "columns", "rows", "truncated", "query_id", "cached"],
+                "properties": {"query_id": {"type": "integer"}},
+                "required": ["query_id"],
             },
+            "outputSchema": MCP_QUERY_RESULT_SCHEMA,
             "annotations": MCP_READ_ONLY_ANNOTATIONS,
         },
     ]
@@ -1388,6 +1410,8 @@ def create_app(
             )
         if name == "run_query":
             return control.run_readonly_sql(arguments, user)
+        if name == "get_query_result":
+            return control.readonly_query_result(arguments, user)
         raise ApiError(400, f"Unknown tool: {name}")
 
     def _mcp_error(message_id: Any, code: int, text: str, status: int) -> JSONResponse:
@@ -1395,6 +1419,15 @@ def create_app(
             {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": text}},
             status_code=status,
         )
+
+    # RFC 9728. MCP clients probe the path-suffixed form for a resource served
+    # at /mcp; the bare form is what a client that ignores the path will try.
+    # Both are unauthenticated by design — discovery has to work before a client
+    # holds a credential.
+    @api.get("/.well-known/oauth-protected-resource/mcp", include_in_schema=False)
+    @api.get("/.well-known/oauth-protected-resource", include_in_schema=False)
+    def mcp_protected_resource_metadata(request: Request) -> dict[str, Any]:
+        return control.mcp_protected_resource_metadata(str(request.base_url).rstrip("/"))
 
     @api.post("/mcp", include_in_schema=False)
     async def mcp_endpoint(request: Request) -> Response:
@@ -1404,11 +1437,19 @@ def create_app(
             if exc.status != 401:
                 raise
             # A bare 401 leaves an MCP client with no way to learn how to
-            # authenticate, so answer with the challenge (RFC 6750 §3).
+            # authenticate, so answer with the challenge (RFC 6750 §3) and the
+            # resource_metadata pointer the MCP authorization spec requires
+            # (RFC 9728 §5.1) — that URL is how a client discovers the
+            # authorization server to send the user to.
+            base = control.mcp_resource_base(str(request.base_url).rstrip("/"))
+            challenge = (
+                'Bearer realm="TrinoHub", '
+                f'resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"'
+            )
             return JSONResponse(
                 {"error": exc.message},
                 status_code=401,
-                headers={"WWW-Authenticate": 'Bearer realm="TrinoHub"'},
+                headers={"WWW-Authenticate": challenge},
             )
 
         # From 2025-06-18 the client echoes the negotiated version on every

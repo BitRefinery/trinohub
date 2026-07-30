@@ -799,7 +799,9 @@ class FastApiRouteTests(unittest.TestCase):
         )
         tools = body["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        self.assertEqual(names, {"list_clusters", "browse_metadata", "run_query"})
+        self.assertEqual(
+            names, {"list_clusters", "browse_metadata", "run_query", "get_query_result"}
+        )
         # Every tool is read-only and declares its output shape, so hosts can
         # skip confirmation prompts and consume structured results.
         for tool in tools:
@@ -832,6 +834,30 @@ class FastApiRouteTests(unittest.TestCase):
             "POST", "/mcp", {"jsonrpc": "2.0", "id": 5, "method": "no/such"}
         )
         self.assertEqual(body["error"]["code"], -32601)
+
+    def test_mcp_advertises_oauth_protected_resource_metadata(self):
+        # A client that only speaks OAuth needs to discover *how* to
+        # authenticate, which RFC 9728 metadata is what makes possible. Both the
+        # bare and the path-suffixed form answer, unauthenticated.
+        for path in (
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        ):
+            status, _, body = self.client.request("GET", path)
+            self.assertEqual(status, 200)
+            self.assertTrue(body["resource"].endswith("/mcp"))
+            self.assertEqual(body["bearer_methods_supported"], ["header"])
+            # No SSO configured yet, so there is no authorization server to name.
+            self.assertNotIn("authorization_servers", body)
+
+        # The 401 points at that document instead of leaving the client stuck.
+        status, headers, _ = self.client.request(
+            "POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+        )
+        self.assertEqual(status, 401)
+        challenge = headers.get("www-authenticate", "")
+        self.assertIn("Bearer", challenge)
+        self.assertIn("/.well-known/oauth-protected-resource/mcp", challenge)
 
 
 if __name__ == "__main__":
