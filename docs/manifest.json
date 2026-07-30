@@ -8,6 +8,7 @@
         { "slug": "getting-started", "title": "Getting started" },
         { "slug": "running-queries", "title": "Running queries" },
         { "slug": "ask-trino", "title": "Ask Trino" },
+        { "slug": "data-products", "title": "Data products & query templates" },
         { "slug": "notebooks", "title": "Notebooks" },
         { "slug": "query-history", "title": "Query history" },
         { "slug": "scheduled-jobs", "title": "Scheduled jobs" },

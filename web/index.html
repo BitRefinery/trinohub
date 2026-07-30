@@ -67,6 +67,10 @@
             <span data-icon="database"></span>
             <span>Catalogs</span>
           </button>
+          <button class="nav-item" data-view-target="data-products" type="button">
+            <span data-icon="table"></span>
+            <span>Data products</span>
+          </button>
           <button class="nav-item" data-view-target="sql" type="button">
             <span data-icon="terminal"></span>
             <span>SQL editor</span>
@@ -688,6 +692,97 @@
             </div>
           </section>
 
+          <section class="view" id="view-data-products" data-title="Data products">
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Curation</p>
+                  <h2>Data products</h2>
+                </div>
+                <button class="primary-button admin-only" id="openCreateDataProduct" type="button">
+                  <span data-icon="plus"></span>
+                  Create data product
+                </button>
+              </div>
+              <p class="mcp-hint">
+                A data product is a documented bundle of tables and views. AI clients find them by
+                keyword through the <code>search_data_products</code> MCP tool, so a good summary is
+                what makes the right data discoverable. Publishing one describes data — it never
+                widens who can read it.
+              </p>
+              <div class="search-field">
+                <span data-icon="search"></span>
+                <input id="dataProductSearch" type="search" placeholder="Search names, summaries, tags, and assets" />
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Location</th>
+                    <th>Owner</th>
+                    <th>Assets</th>
+                    <th>Tags</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="dataProductRows">
+                  <tr><td colspan="6">No data products yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="panel table-panel" id="dataProductAssetsPanel" hidden>
+              <div class="panel-header compact">
+                <h3 id="dataProductAssetsTitle">Assets</h3>
+                <button class="ghost-button" id="closeDataProductAssets" type="button">Close</button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Type</th>
+                    <th>Location</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody id="dataProductAssetRows"></tbody>
+              </table>
+            </div>
+
+            <div class="panel table-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Curation</p>
+                  <h2>Query templates</h2>
+                </div>
+                <button class="primary-button admin-only" id="openCreateQueryTemplate" type="button">
+                  <span data-icon="plus"></span>
+                  Create template
+                </button>
+              </div>
+              <p class="mcp-hint">
+                A template publishes one parameterized query as a callable MCP tool. Clients supply
+                typed values through <code>run_query_template</code> and never write SQL, so this is
+                how you hand an agent a specific question rather than the run of the warehouse. Write
+                holes as <code>{{name}}</code> in the SQL and declare each one below.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Template</th>
+                    <th>Cluster</th>
+                    <th>Parameters</th>
+                    <th>Status</th>
+                    <th class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="queryTemplateRows">
+                  <tr><td colspan="5">No query templates yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           <section class="view" id="view-sql" data-title="SQL editor">
             <div class="sql-workspace">
               <div class="sql-edge-rail left" data-sql-sidebar-rail="left" hidden>
@@ -1084,8 +1179,8 @@ LIMIT 10;</textarea>
                 </div>
                 <p class="mcp-lede">
                   TrinoHub speaks the <strong>Model Context Protocol</strong>, so Claude and other MCP
-                  hosts can browse your catalogs and run read-only queries — acting as you, under your
-                  own grants and data policies.
+                  hosts can search your data products, browse catalogs, and run read-only queries —
+                  acting as you, under your own grants and data policies.
                 </p>
                 <div class="connect-fields" id="mcpEndpointFields"></div>
                 <p class="mcp-hint">
@@ -1166,13 +1261,19 @@ LIMIT 10;</textarea>
                 <ul class="mcp-bullets">
                   <li>
                     <span data-icon="check"></span>
-                    <span>Browse catalogs, schemas, tables, and columns on clusters you can reach.</span>
+                    <span>Browse catalogs, schemas, tables, and columns on clusters you can reach, and
+                      search the data products you have been granted.</span>
                   </li>
                   <li>
                     <span data-icon="check"></span>
                     <span>Run a single read-only <code>SELECT</code>, <code>SHOW</code>,
                       <code>DESCRIBE</code>, or <code>EXPLAIN</code> and read the rows back, capped to
                       100 KB so a result cannot swamp the model's context.</span>
+                  </li>
+                  <li>
+                    <span data-icon="check"></span>
+                    <span>Run a query template you have published, supplying typed parameter values
+                      that are validated and escaped before they reach the SQL.</span>
                   </li>
                   <li>
                     <span data-icon="x"></span>

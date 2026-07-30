@@ -4673,6 +4673,68 @@ class DiscoveryPaginationTests(unittest.TestCase):
         self.assertEqual(len(status["network"]["security_groups"]), 1)
 
 
+class QueryTemplateRenderingTests(unittest.TestCase):
+    """Templates let a caller supply values, never SQL. The escaping here is the
+    first line of defence; run_query_template still revalidates the result."""
+
+    PARAMS = [
+        {"name": "region", "type": "string", "required": True, "default": ""},
+        {"name": "col", "type": "identifier", "required": True, "default": ""},
+        {"name": "row_limit", "type": "number", "required": False, "default": "10"},
+    ]
+    SQL = "SELECT {{col}} FROM sales WHERE region = {{region}} LIMIT {{row_limit}}"
+
+    def test_values_are_escaped_and_defaults_applied(self):
+        from trinohub.server import render_query_template_sql
+
+        self.assertEqual(
+            render_query_template_sql(self.SQL, self.PARAMS, {"region": "O'Brien", "col": "amount"}),
+            "SELECT \"amount\" FROM sales WHERE region = 'O''Brien' LIMIT 10",
+        )
+
+    def test_injection_attempts_are_rejected_by_type(self):
+        from trinohub.server import render_query_template_sql
+
+        for values in [
+            {"region": "x", "col": "a; DROP TABLE t"},
+            {"region": "x", "col": "a", "row_limit": "1; DROP TABLE t"},
+            # float() would accept these, but to Trino they are identifiers.
+            {"region": "x", "col": "a", "row_limit": "inf"},
+            {"region": "x", "col": "a", "row_limit": "nan"},
+        ]:
+            with self.assertRaises(ApiError):
+                render_query_template_sql(self.SQL, self.PARAMS, values)
+
+    def test_missing_and_unknown_parameters_are_refused(self):
+        from trinohub.server import render_query_template_sql
+
+        with self.assertRaises(ApiError):
+            render_query_template_sql(self.SQL, self.PARAMS, {"col": "a"})
+        with self.assertRaises(ApiError):
+            render_query_template_sql(self.SQL, self.PARAMS, {"region": "x", "col": "a", "ghost": 1})
+
+    def test_a_quoted_string_cannot_break_out_of_its_literal(self):
+        from trinohub.server import render_query_template_sql, validate_read_only_sql
+
+        rendered = render_query_template_sql(
+            self.SQL, self.PARAMS, {"region": "' OR 1=1 --", "col": "amount"}
+        )
+        # The payload stays inside the literal, so the statement is still a
+        # single read-only SELECT rather than a smuggled second clause.
+        self.assertIn("''' OR 1=1 --'", rendered)
+        self.assertEqual(validate_read_only_sql(rendered, allow_metadata=True), rendered)
+
+    def test_date_and_boolean_types_render_as_sql_literals(self):
+        from trinohub.server import render_query_template_value
+
+        self.assertEqual(
+            render_query_template_value({"name": "d", "type": "date"}, "2026-01-31"), "DATE '2026-01-31'"
+        )
+        self.assertEqual(render_query_template_value({"name": "b", "type": "boolean"}, "TRUE"), "true")
+        with self.assertRaises(ApiError):
+            render_query_template_value({"name": "d", "type": "date"}, "31/01/2026")
+
+
 class AskTrinoSqlGuardTests(unittest.TestCase):
     """The validation/parsing helpers are the safety boundary around LLM SQL."""
 
