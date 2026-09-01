@@ -54,8 +54,8 @@ TrinoHub's control-plane API is a FastAPI app. From Settings you can open:
 - **OpenAPI schema** at `/openapi.json` — the machine-readable spec.
 
 There is also a Prometheus **metrics** endpoint at `/metrics` and a read-only
-**MCP** endpoint at `/mcp` — see **Automation & API**. (All of these are
-separate from this in-app **Docs** section you're reading now.)
+**MCP** endpoint at `/mcp` — see **Automation & API** and **MCP server**. (All
+of these are separate from this in-app **Docs** section you're reading now.)
 
 ## Security model
 
