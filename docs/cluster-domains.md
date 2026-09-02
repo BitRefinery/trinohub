@@ -92,6 +92,31 @@ Certificates are issued **on demand**: the first time a client connects to
 a real cluster before requesting a certificate, so random hostnames can't trigger
 issuance.
 
+### The base domain itself serves the TrinoHub UI
+
+The gateway also routes the **base domain** — `https://trino.acme.internal/` —
+to the control plane, so the TrinoHub UI has an HTTPS hostname of its own rather
+than only `http://<instance-ip>:8000`. Clusters keep the subdomains:
+
+```
+https://trino.acme.internal/              →  the TrinoHub UI
+https://lakehouse.trino.acme.internal/    →  the lakehouse cluster's coordinator
+```
+
+This needs the base domain to resolve as well as the wildcard, so add an A record
+for it alongside the `*.` one (see **DNS: you own resolution** above), pointing at
+the control-plane instance.
+
+Two consequences worth knowing:
+
+- The UI sits **behind the same allowed-UI-CIDR gate** as everything else on the
+  proxy. Broadening those ranges to publish the UI also broadens who can reach
+  your clusters — they are one allow-list, not two.
+- If a cluster's [hostname override](#per-cluster-hostname-override) is set to
+  the base domain exactly, that cluster keeps the name and the UI route steps
+  aside. That is almost certainly a misconfiguration, but it fails toward the
+  behaviour you explicitly asked for rather than silently overriding it.
+
 **Access is still restricted.** The gateway only accepts client connections from
 your **allowed UI CIDRs** (the same ranges that gate the app) — everything else
 is refused at the proxy. This matters because Trino coordinators have **no client

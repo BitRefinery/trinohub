@@ -32,6 +32,10 @@ COORDINATOR_HTTP_PORT = 8080
 # routed to the control-plane app instead, which speaks just enough of the Trino
 # wire protocol to resume the cluster and hold the client until it is ready.
 SHIM_UPSTREAM = os.environ.get("TRINOHUB_WIRE_SHIM_UPSTREAM", "127.0.0.1:8000")
+# The control-plane app itself, served at the base domain so the UI has a TLS
+# hostname. Same process as the wire shim above; named separately because they
+# are different roles and an operator may relocate one without the other.
+CONTROL_PLANE_UPSTREAM = os.environ.get("TRINOHUB_CONTROL_PLANE_UPSTREAM", "127.0.0.1:8000")
 
 
 def build_caddyfile(
@@ -41,6 +45,7 @@ def build_caddyfile(
     *,
     ask_url: str = TLS_ASK_URL,
     admin_addr: str = "127.0.0.1:2019",
+    control_plane_upstream: str = CONTROL_PLANE_UPSTREAM,
 ) -> str:
     """Render the Caddy config for the gateway.
 
@@ -48,6 +53,12 @@ def build_caddyfile(
     ``ip:port`` upstream. ``allowed_cidrs`` empty means "allow all" (matching the
     app's own allowed-UI-CIDR semantics). All inputs are pre-validated
     (hostnames, IPs, CIDRs), so direct interpolation is safe.
+
+    The **base domain itself** is routed to the control plane, so the TrinoHub UI
+    is reachable over TLS at ``https://<base-domain>/`` while clusters live on
+    ``<cluster>.<base-domain>``. ``authorize_tls_domain`` already mints a
+    certificate for the base domain; without this route that certificate served
+    nothing but the "no running cluster" fallback.
     """
     # Site addresses: the wildcard covers every derived cluster name; explicit
     # override hostnames outside the base domain are added alongside it.
@@ -83,6 +94,11 @@ def build_caddyfile(
     for index, (host, upstream) in enumerate(sorted(routes.items())):
         lines.append(f"\t\t@c{index} host {host}")
         lines.append(f"\t\treverse_proxy @c{index} {upstream}")
+    # The UI last, so a cluster that explicitly overrides its hostname to the
+    # base domain still wins the match above and keeps working.
+    if base_domain not in routes:
+        lines.append(f"\t\t@ui host {base_domain}")
+        lines.append(f"\t\treverse_proxy @ui {control_plane_upstream}")
     lines.append('\t\trespond "No running cluster for this hostname." 503')
     lines.append("\t}")
     lines.append("}")

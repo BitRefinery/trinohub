@@ -587,6 +587,60 @@ class ServerModelTests(unittest.TestCase):
         conf = build_caddyfile("trino.acme.internal", [], {"analytics.example.com": "10.0.1.11:8080"})
         self.assertIn("analytics.example.com {", conf)
 
+    def test_build_caddyfile_routes_base_domain_to_control_plane(self):
+        """The UI is reachable at the base domain over TLS.
+
+        authorize_tls_domain already mints a certificate for the base domain, so
+        without this route that certificate served only the 503 fallback.
+        """
+        from trinohub.tls_gateway import build_caddyfile
+
+        conf = build_caddyfile(
+            "trino.acme.internal",
+            [],
+            {"lakehouse.trino.acme.internal": "10.0.1.10:8080"},
+        )
+        self.assertIn("@ui host trino.acme.internal", conf)
+        self.assertIn("reverse_proxy @ui 127.0.0.1:8000", conf)
+        # Cluster routing is unaffected, and the fallback still backstops
+        # hostnames that match neither.
+        self.assertIn("reverse_proxy @c0 10.0.1.10:8080", conf)
+        self.assertIn("No running cluster for this hostname.", conf)
+
+    def test_build_caddyfile_ui_route_does_not_shadow_a_cluster_override(self):
+        """A cluster that overrides its hostname to the base domain still wins.
+
+        Caddy takes the first matching route, so the UI route must come after
+        the cluster routes; otherwise pointing a cluster at the apex would
+        silently start serving the control plane instead of the coordinator.
+        """
+        from trinohub.tls_gateway import build_caddyfile
+
+        conf = build_caddyfile(
+            "trino.acme.internal",
+            [],
+            {"trino.acme.internal": "10.0.1.12:8080"},
+        )
+        self.assertIn("reverse_proxy @c0 10.0.1.12:8080", conf)
+        self.assertNotIn("@ui host", conf)
+
+    def test_build_caddyfile_ui_upstream_is_overridable(self):
+        from trinohub.tls_gateway import build_caddyfile
+
+        conf = build_caddyfile(
+            "trino.acme.internal", [], {}, control_plane_upstream="127.0.0.1:9000"
+        )
+        self.assertIn("reverse_proxy @ui 127.0.0.1:9000", conf)
+
+    def test_build_caddyfile_ui_route_is_behind_the_cidr_gate(self):
+        """The UI must not be reachable from an address the operator blocked."""
+        from trinohub.tls_gateway import build_caddyfile
+
+        conf = build_caddyfile("trino.acme.internal", ["203.0.113.4/32"], {})
+        gate = conf.index("@blocked not remote_ip")
+        ui = conf.index("@ui host")
+        self.assertLess(gate, ui, "CIDR denial must be evaluated before the UI route")
+
     def test_create_cluster_defaults_and_pins_trino_version(self):
         from trinohub.aws_checks import SUPPORTED_TRINO_VERSIONS, TRINO_VERSION
 

@@ -10,6 +10,17 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+### Added
+
+- **The TLS gateway serves the TrinoHub UI at the base domain.** Setting a base
+  domain already minted a Let's Encrypt certificate for it, but nothing was
+  routed there, so the name answered with the "no running cluster" fallback. The
+  base domain now proxies to the control plane, giving the UI an HTTPS hostname
+  (`https://trino.example.com/`) while clusters keep their subdomains
+  (`https://lakehouse.trino.example.com/`). The UI route sits behind the same
+  allowed-UI-CIDR gate as the rest of the proxy, and a cluster whose hostname
+  override *is* the base domain still wins the route.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
