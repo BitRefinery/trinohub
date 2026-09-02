@@ -10,6 +10,20 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Catalog connection details are no longer visible to every signed-in user.**
+  `GET /api/catalogs` listed every catalog with its full config to any
+  authenticated caller, regardless of catalog grants — disclosing database
+  endpoints, connection usernames, Secrets Manager ARNs and the AWS account id
+  to accounts that held no privileges at all. The Catalogs view is not
+  admin-gated, so this was reachable in the UI and not only over the API. Stored
+  passwords were never exposed (only the secret reference is persisted), but the
+  surrounding infrastructure detail was. A caller without `MANAGE_CATALOGS` now
+  sees only the catalogs they hold a grant for, and each config is reduced to an
+  allow-list of harmless keys. **Upgrading is recommended for any install with
+  non-admin accounts.**
+
 ### Added
 
 - **The TLS gateway serves the TrinoHub UI at the base domain.** Setting a base

@@ -252,6 +252,11 @@ PRIVILEGE_MANAGE_USERS = "MANAGE_USERS"
 PRIVILEGE_MANAGE_SECURITY = "MANAGE_SECURITY"
 PRIVILEGE_MANAGE_CLUSTERS = "MANAGE_CLUSTERS"
 PRIVILEGE_MANAGE_CATALOGS = "MANAGE_CATALOGS"
+# Catalog config keys safe to show a caller without MANAGE_CATALOGS. Everything
+# else — connection URLs, usernames, secret ARNs — describes infrastructure and
+# is withheld. The browser only needs the description (web/app.js renders it as
+# the summary line for built-in catalogs).
+SAFE_CATALOG_CONFIG_KEYS = frozenset({"description"})
 PRIVILEGE_MANAGE_SETTINGS = "MANAGE_SETTINGS"
 PRIVILEGE_VIEW_ALL_QUERY_HISTORY = "VIEW_ALL_QUERY_HISTORY"
 PRIVILEGE_CANCEL_ANY_QUERY = "CANCEL_ANY_QUERY"
@@ -6607,10 +6612,34 @@ class TrinoHubApp:
         self.audit(actor, "cluster.delete", cluster["name"])
         return {"deleted": True, "cluster": cluster, "cleanup": cleanup}
 
-    def list_catalogs(self) -> dict[str, Any]:
+    def list_catalogs(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Catalogs the caller may see, with connection details kept for admins.
+
+        ``user`` is required rather than optional on purpose: a default would
+        silently restore the unfiltered listing for any caller that forgot to
+        pass one, which is exactly how connection configs leaked in the first
+        place.
+
+        Without MANAGE_CATALOGS a caller sees only the catalogs they hold a
+        grant for, and each config is reduced to an allow-list of harmless keys.
+        An allow-list, not a deny-list: a connector added later cannot leak a
+        new field by being forgotten here.
+        """
+        may_manage = self.has_privilege(user, PRIVILEGE_MANAGE_CATALOGS)
         with self.conn() as conn:
             rows = conn.execute("SELECT * FROM catalogs ORDER BY name").fetchall()
-            return {"catalogs": [self.public_catalog(row) for row in rows]}
+        catalogs: list[dict[str, Any]] = []
+        for row in rows:
+            catalog = self.public_catalog(row)
+            if not may_manage:
+                if not self.user_can_use_catalog(user, catalog["name"]):
+                    continue
+                config = catalog.get("config") or {}
+                catalog["config"] = {
+                    key: value for key, value in config.items() if key in SAFE_CATALOG_CONFIG_KEYS
+                }
+            catalogs.append(catalog)
+        return {"catalogs": catalogs}
 
     def list_connector_types(self) -> dict[str, Any]:
         # Registry-derived form schema for the Add-Catalog UI. The browser builds

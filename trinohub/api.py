@@ -1014,8 +1014,8 @@ def create_app(
         return {"results": control.poll_auto_suspend_once()}
 
     @api.get("/api/catalogs", tags=["catalogs"])
-    def list_catalogs(_: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
-        return control.list_catalogs()
+    def list_catalogs(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        return control.list_catalogs(user)
 
     @api.post("/api/catalogs", status_code=201, tags=["catalogs"])
     def create_catalog(
