@@ -10,6 +10,8 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-02
+
 ### Added
 
 - **Data products.** A curated, documented bundle of tables and views with an
@@ -38,6 +40,16 @@ Anything landing on `main` between releases goes under **Unreleased**.
 - **`MANAGE_DATA_PRODUCTS` privilege**, gating both curation surfaces above.
   The seeded `admin` role is now kept in sync with the full privilege list, so a
   database created before a privilege existed picks it up on startup.
+- **MCP has its own documentation topic.** The MCP screen is visible to every
+  user, but its documentation lived inside the admin-only **Automation & API**
+  topic, so an analyst could open the screen and read nothing about it. **MCP**
+  is now a top-level, non-admin docs group, rewritten against the server: all
+  eight tools, what each one may run, and how `/mcp` is authenticated and
+  firewalled. **Data products** is documented alongside it.
+- **Installing on a host you manage yourself is documented.** The README now
+  compares the three install paths — CloudFormation stack, your own host, local
+  development — and walks through the apt/venv/systemd route, the instance
+  profile the control plane needs, and how running off EC2 degrades.
 - This changelog, backfilled to the first tagged release. Its section for a tag
   is published as that GitHub Release's body, so release notes are written once
   rather than auto-generated from PR titles.
@@ -56,6 +68,42 @@ Anything landing on `main` between releases goes under **Unreleased**.
   1,000-row / 10 MB display cap. A tool result is read into a model's context
   rather than rendered in a table, so the old cap could swamp a client long
   before the data became useful. Trimmed results still report `truncated: true`.
+
+### Fixed
+
+- The unattended maintenance agent in `automation/` never ran: its systemd units
+  were never installed, its service unit pointed at the wrong checkout path, it
+  had no git identity on the build box, and a half-built virtualenv was never
+  rebuilt. All four are fixed, and a release-preparation job runs alongside it.
+
+### Upgrading
+
+No migration or configuration change is required. The three new tables
+(`query_templates`, `data_products`, `data_product_assets`) are created on
+startup, and the seeded `admin` role picks up `MANAGE_DATA_PRODUCTS`
+automatically. Back up `.trinohub/` before upgrading, and upgrade an existing
+instance through SSM — see the [AWS upgrade guide](deploy/aws/README.md#updating).
+New CloudFormation installations pin to the immutable `v0.4.0` release.
+
+Four things to check afterwards:
+
+- **Custom roles do not get the new privilege.** Only the system `admin` role is
+  synced. Grant `MANAGE_DATA_PRODUCTS` under **Users → Roles** to any custom
+  role whose members should publish data products or query templates. Reading a
+  product needs no new privilege — the existing cluster and catalog grants still
+  decide what a caller sees.
+- **MCP tool results are now capped at 100 KB.** A client that relied on the old
+  1,000-row / 10 MB limit will see `truncated: true` sooner. Narrow the query, or
+  page through it with `run_query` and `get_query_result`.
+- **The MCP tool surface is wider than `SELECT`.** If your review of MCP access
+  assumed `SELECT`-only, note that `SHOW`, `DESCRIBE`, and `EXPLAIN` now reach
+  metadata for any catalog the caller is already granted. Writes and
+  `EXPLAIN ANALYZE` are still refused, and Ask Trino stays `SELECT`-only.
+- **Behind a reverse proxy, set the SSO redirect base** if you want OAuth
+  discovery to work. The new discovery documents and the `WWW-Authenticate`
+  challenge take their URLs from that setting when it is configured
+  (`PUT /api/sso/oidc`, `redirect_base`) and from the incoming request
+  otherwise, which behind a proxy is the internal address a client cannot reach.
 
 ## [0.3.0] - 2026-07-29
 
@@ -131,6 +179,7 @@ Existing instances upgrade through SSM — see the
 [AWS upgrade guide](deploy/aws/README.md#updating). Back up `.trinohub/`
 first.
 
-[Unreleased]: https://github.com/BitRefinery/trinohub/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/BitRefinery/trinohub/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/BitRefinery/trinohub/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BitRefinery/trinohub/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/BitRefinery/trinohub/releases/tag/v0.2.0
