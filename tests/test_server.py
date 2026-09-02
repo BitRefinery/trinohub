@@ -12,6 +12,10 @@ from trinohub.aws_checks import TRINO_HTTP_PORT, TRINO_VERSION, AwsInspector
 from trinohub.server import ApiError, TrinoHubApp
 
 
+# A pre-RBAC admin record: user_privileges falls back to the legacy role column
+# when the user holds no role rows, which is all these listing tests need.
+ADMIN_VIEWER = {"id": 1, "role": "admin"}
+
 class FakeAws:
     def __init__(self):
         self.cleanup_calls = []
@@ -586,6 +590,96 @@ class ServerModelTests(unittest.TestCase):
 
         conf = build_caddyfile("trino.acme.internal", [], {"analytics.example.com": "10.0.1.11:8080"})
         self.assertIn("analytics.example.com {", conf)
+
+    def test_list_catalogs_hides_connection_config_from_non_admins(self):
+        """A caller without MANAGE_CATALOGS must not see connection details.
+
+        The catalogs view is not admin-gated in the UI, so every signed-in user
+        reaches this listing. Leaking config here disclosed database endpoints,
+        usernames, secret ARNs and the AWS account id to anyone who could log in.
+        """
+        self._admin_and_cluster()
+        self.app.secret_store = FakeSecretStore()
+        self.app.create_catalog(
+            {
+                "name": "warehouse_pg",
+                "type": "postgresql",
+                "config": {
+                    "connection_url": "jdbc:postgresql://db.internal.example:5432/warehouse",
+                    "connection_user": "trino",
+                },
+                "password": "s3cr3t-pw",
+            },
+            {"id": 1, "username": "admin"},
+        )
+        role = self.app.create_role(
+            {"name": "viewer", "privileges": [], "catalog_grants": ["warehouse_pg"]},
+            {"id": 1, "username": "admin"},
+        )["role"]
+        viewer = self.app.create_user(
+            {"username": "viewer", "password": "viewer-password-1", "roles": [role["name"]]},
+            {"id": 1, "username": "admin"},
+        )["user"]
+
+        listed = self.app.list_catalogs(viewer)
+        names = [c["name"] for c in listed["catalogs"]]
+        self.assertIn("warehouse_pg", names, "a granted catalog must still be listed")
+
+        entry = next(c for c in listed["catalogs"] if c["name"] == "warehouse_pg")
+        self.assertEqual(entry["config"], {}, "connection config must be withheld")
+        blob = json.dumps(listed)
+        for leaked in ("db.internal.example", "connection_url", "connection_user", "password_secret_ref"):
+            self.assertNotIn(leaked, blob)
+
+        # The admin view is unchanged.
+        admin_entry = next(
+            c for c in self.app.list_catalogs(ADMIN_VIEWER)["catalogs"] if c["name"] == "warehouse_pg"
+        )
+        self.assertIn("connection_url", admin_entry["config"])
+
+    def test_list_catalogs_omits_catalogs_the_caller_has_no_grant_for(self):
+        self._admin_and_cluster()
+        self.app.secret_store = FakeSecretStore()
+        self.app.create_catalog(
+            {
+                "name": "private_pg",
+                "type": "postgresql",
+                "config": {
+                    "connection_url": "jdbc:postgresql://db.internal.example:5432/private",
+                    "connection_user": "trino",
+                },
+                "password": "s3cr3t-pw",
+            },
+            {"id": 1, "username": "admin"},
+        )
+        role = self.app.create_role(
+            {"name": "viewer", "privileges": [], "catalog_grants": ["tpch"]},
+            {"id": 1, "username": "admin"},
+        )["role"]
+        viewer = self.app.create_user(
+            {"username": "viewer", "password": "viewer-password-1", "roles": [role["name"]]},
+            {"id": 1, "username": "admin"},
+        )["user"]
+
+        names = [c["name"] for c in self.app.list_catalogs(viewer)["catalogs"]]
+        self.assertNotIn("private_pg", names)
+        self.assertIn("tpch", names)
+        # ``system`` is cluster metadata, not data, and stays browsable.
+        self.assertIn("system", names)
+
+    def test_list_catalogs_keeps_the_description_for_non_admins(self):
+        """web/app.js renders config.description as the built-in summary line."""
+        self._admin_and_cluster()
+        role = self.app.create_role(
+            {"name": "viewer", "privileges": [], "catalog_grants": ["tpch"]},
+            {"id": 1, "username": "admin"},
+        )["role"]
+        viewer = self.app.create_user(
+            {"username": "viewer", "password": "viewer-password-1", "roles": [role["name"]]},
+            {"id": 1, "username": "admin"},
+        )["user"]
+        entry = next(c for c in self.app.list_catalogs(viewer)["catalogs"] if c["name"] == "tpch")
+        self.assertEqual(entry["config"].get("description"), "TPC-H sample data")
 
     def test_build_caddyfile_routes_base_domain_to_control_plane(self):
         """The UI is reachable at the base domain over TLS.
@@ -1219,7 +1313,7 @@ class ServerModelTests(unittest.TestCase):
             "abfss://warehouse@companylake.dfs.core.windows.net/iceberg/",
         )
         self.assertIn("password_secret_ref", created["config"])
-        self.assertNotIn("base64-azure-storage-key", json.dumps(self.app.list_catalogs()))
+        self.assertNotIn("base64-azure-storage-key", json.dumps(self.app.list_catalogs(ADMIN_VIEWER)))
         with self.assertRaises(ApiError) as context:
             self.app.create_catalog(
                 {
@@ -1322,7 +1416,7 @@ class ServerModelTests(unittest.TestCase):
         self.assertNotIn("s3cr3t-pw", row["config_json"])
 
         # GET /api/catalogs must never echo the password either.
-        listed = json.dumps(self.app.list_catalogs())
+        listed = json.dumps(self.app.list_catalogs(ADMIN_VIEWER))
         self.assertNotIn("s3cr3t-pw", listed)
 
     def test_create_postgresql_catalog_requires_password(self):
@@ -1718,7 +1812,7 @@ class ServerModelTests(unittest.TestCase):
         with self.app.conn() as conn:
             row = conn.execute("SELECT config_json FROM catalogs WHERE name = 'warehouse_bigquery'").fetchone()
         self.assertNotIn("PRIVATE KEY", row["config_json"])
-        self.assertNotIn("MIIsecret", json.dumps(self.app.list_catalogs()))
+        self.assertNotIn("MIIsecret", json.dumps(self.app.list_catalogs(ADMIN_VIEWER)))
         self.assertEqual(self.app.secret_store.secrets[config["password_secret_ref"]], key)
 
     def test_bigquery_catalog_rejects_invalid_service_account_key(self):
