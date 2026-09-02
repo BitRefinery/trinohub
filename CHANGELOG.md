@@ -102,7 +102,7 @@ Four things to check afterwards:
 - **Behind a reverse proxy, set the SSO redirect base** if you want OAuth
   discovery to work. The new discovery documents and the `WWW-Authenticate`
   challenge take their URLs from that setting when it is configured
-  (`PUT /api/settings/oidc`, `redirect_base`) and from the incoming request
+  (`PUT /api/sso/oidc`, `redirect_base`) and from the incoming request
   otherwise, which behind a proxy is the internal address a client cannot reach.
 
 ## [0.3.0] - 2026-07-29
