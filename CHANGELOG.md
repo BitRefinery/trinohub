@@ -30,6 +30,11 @@ Anything landing on `main` between releases goes under **Unreleased**.
   sees only the catalogs they hold a grant for, and each config is reduced to an
   allow-list of harmless keys. **Upgrading is recommended for any install with
   non-admin accounts.**
+- **Data products and Query templates: the section descriptions no longer run to
+  the edge of their panel.** Both reuse the `.mcp-hint` style, but the padding
+  that goes with it was scoped to `.mcp-panel`, so outside the MCP view the text
+  sat flush against the border while the headings and table cells were inset.
+  The search field on that screen had the same problem.
 
 ### Added
 
