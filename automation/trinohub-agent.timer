@@ -1,12 +1,17 @@
-# systemd timer — run the issue agent once a day. Enable with:
+# systemd USER timer — run the issue agent every other day. Enable with:
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now trinohub-agent.timer
+#   loginctl enable-linger "$USER"
 [Unit]
-Description=Run the TrinoHub issue agent daily
+Description=Run the TrinoHub issue agent on Mon/Wed/Fri
 
 [Timer]
-# 09:15 local time each day, with jitter; catches up if the machine was off.
-OnCalendar=*-*-* 09:15:00
+# Every other day at 09:15 local, with jitter; catches up if the machine was off.
+#
+# Mon,Wed,Fri rather than a */2 day-of-month expression on purpose: */2 counts
+# from the 1st of each month, so it double-fires across every 31-day month
+# boundary (the 31st and then the 1st). A weekday list has no such seam.
+OnCalendar=Mon,Wed,Fri *-*-* 09:15:00
 RandomizedDelaySec=600
 Persistent=true
 

@@ -1,0 +1,19 @@
+# systemd USER timer — prepare a release once a week. Enable with:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trinohub-release.timer
+#   loginctl enable-linger "$USER"
+[Unit]
+Description=Prepare a TrinoHub release every Friday
+
+[Timer]
+# Friday 17:00 local, with jitter; catches up if the machine was off.
+#
+# Deliberately far from the issue agent's 09:15 slot: both jobs run on Friday.
+# They already use separate clones, so this is about not competing for the box,
+# not about correctness.
+OnCalendar=Fri *-*-* 17:00:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

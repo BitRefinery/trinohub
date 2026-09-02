@@ -28,9 +28,12 @@
 set -euo pipefail
 
 # ---- Config (override via env or automation/agent.env) --------------------------
-CONFIG_FILE="${AGENT_CONFIG:-"$(dirname "$0")/agent.env"}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_FILE="${AGENT_CONFIG:-"$SCRIPT_DIR/agent.env"}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+RULES_FILE="${RULES_FILE:-"$SCRIPT_DIR/house-rules.md"}"
 
 REPO="${REPO:?Set REPO=owner/trinohub in agent.env}"
 WORKDIR="${WORKDIR:-"$HOME/.trinohub-agent/checkout"}"
@@ -40,8 +43,23 @@ LABEL_QUEUED="${LABEL_QUEUED:-agent:queued}"
 LABEL_INREVIEW="${LABEL_INREVIEW:-agent:in-review}"
 LABEL_BLOCKED="${LABEL_BLOCKED:-agent:blocked}"
 MAX_ISSUES="${MAX_ISSUES:-3}"
+# BitRefinery is the only GitHub identity for this project; see house-rules.md.
+GIT_AUTHOR_NAME_="${GIT_AUTHOR_NAME_:-BitRefinery}"
+GIT_AUTHOR_EMAIL_="${GIT_AUTHOR_EMAIL_:-299273308+BitRefinery@users.noreply.github.com}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-}"            # e.g. claude-opus-4-8 ; empty = CLI default
 TEST_CMD="${TEST_CMD:-.venv/bin/python -m unittest discover -s tests -v && .venv/bin/python testing/run_e2e.py}"
+
+# The agent must work in a DEDICATED clone. If WORKDIR is the repository this
+# script lives in (or anywhere inside it), an unattended run would rewrite the
+# working checkout with `git reset --hard` and `git clean -fd`. Refuse instead.
+WORKDIR_ABS="$(readlink -m "$WORKDIR")"
+case "$WORKDIR_ABS" in
+  "$REPO_ROOT" | "$REPO_ROOT"/*)
+    echo "REFUSING TO RUN: WORKDIR ($WORKDIR_ABS) is inside this checkout ($REPO_ROOT)." >&2
+    echo "The agent needs a dedicated clone; set WORKDIR to a path outside the repo." >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p "$LOGDIR" "$(dirname "$WORKDIR")"
 RUN_LOG="$LOGDIR/run-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -50,22 +68,59 @@ log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$RUN_LOG"; }
 require() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }; }
 require gh; require claude; require jq; require git
 
+# `python3 -m venv` needs ensurepip, which Debian/Ubuntu split into a separate
+# package. Without it venv creation fails several steps into a run with a wall of
+# stderr; check up front and name the fix.
+if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
+  echo "Missing ensurepip: 'python3 -m venv' cannot create the clone's venv." >&2
+  echo "Install it, e.g.: sudo apt-get install -y python3.14-venv" >&2
+  exit 1
+fi
+
+# Shared rules pasted into every prompt (authorship, branch protection, CI, docs).
+if [ ! -f "$RULES_FILE" ]; then
+  echo "Missing house rules file: $RULES_FILE" >&2
+  exit 1
+fi
+HOUSE_RULES="$(sed "s|{{REPO}}|$REPO|g" "$RULES_FILE")"
+
 # ---- Refresh the dedicated clone ------------------------------------------------
 if [ ! -d "$WORKDIR/.git" ]; then
   log "Cloning $REPO into $WORKDIR"
   gh repo clone "$REPO" "$WORKDIR" -- --quiet
 fi
 cd "$WORKDIR"
+
+# Pin the commit identity in the clone. There is deliberately no global git
+# identity on the build box, so without this every commit fails with "unable to
+# auto-detect email address" — and any address that *did* get inherited would
+# misattribute the commit to a different GitHub account. See house-rules.md.
+git config user.name "$GIT_AUTHOR_NAME_"
+git config user.email "$GIT_AUTHOR_EMAIL_"
+
 git fetch --quiet origin
 git checkout --quiet "$BASE_BRANCH"
 git reset --hard --quiet "origin/$BASE_BRANCH"
 git clean -fdq -e .venv
 
-# Ensure a venv exists for the tests (kept out of git).
-if [ ! -x ".venv/bin/python" ]; then
-  log "Creating .venv"
+# Ensure a WORKING venv for the tests (kept out of git). Checking only for
+# .venv/bin/python is not enough: a venv creation that dies partway (no
+# ensurepip, disk full) leaves a python binary with no pip and no dependencies,
+# and every later run would skip recreation and fail the tests with import
+# errors that look like the agent's fault. Stamp the requirements hash too, so a
+# dependency added upstream triggers a reinstall instead of a stale venv.
+REQ_STAMP=".venv/.requirements.sha256"
+REQ_WANT="$(sha256sum requirements.txt | cut -d" " -f1)"
+if [ ! -x ".venv/bin/python" ] || [ ! -x ".venv/bin/pip" ] \
+   || [ "$(cat "$REQ_STAMP" 2>/dev/null || true)" != "$REQ_WANT" ]; then
+  log "Building .venv (missing, incomplete, or requirements.txt changed)"
+  rm -rf .venv
   python3 -m venv .venv
-  .venv/bin/pip install -q -r requirements.txt || log "WARN: pip install had issues"
+  if .venv/bin/pip install -q -r requirements.txt; then
+    echo "$REQ_WANT" > "$REQ_STAMP"
+  else
+    log "WARN: pip install had issues"
+  fi
 fi
 
 # ---- Find triaged issues --------------------------------------------------------
@@ -122,6 +177,18 @@ ${body}
 6. Update docs/ if behavior changed.
 7. Commit your work with a clear, imperative message. Do NOT push and do NOT open
    a PR — the wrapper script handles that.
+
+## House rules (non-negotiable)
+
+${HOUSE_RULES}
+
+## Scope note for this job
+
+The wrapper script pushes the branch and opens the draft PR for you, so you will
+not normally run \`git push\` or \`gh pr create\` yourself. The rules above still
+bind you: if you do touch the remote, the authorship, no-fork, and
+never-bypass-branch-protection rules apply in full. Never merge a pull request —
+this job never merges anything, and a human reviews every draft.
 
 If the issue is unclear, under-specified, or you cannot make the tests pass, STOP,
 do not fabricate a change, and end your reply with the exact line:

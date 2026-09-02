@@ -1,0 +1,33 @@
+# systemd USER service — one shot of the weekly release preparation job.
+# Paired with trinohub-release.timer.
+#
+# Install (as the user that owns the clone and the gh/claude credentials):
+#   mkdir -p ~/.config/systemd/user
+#   cp /sites/trinohub/automation/trinohub-release.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trinohub-release.timer
+#   loginctl enable-linger "$USER"   # REQUIRED: fire while nobody is logged in
+#
+# A run that finds nothing to release exits 0. That is the expected outcome most
+# weeks and is NOT a failure.
+
+[Unit]
+Description=TrinoHub weekly release preparation (draft PR only; never tags)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/sites/trinohub/automation
+EnvironmentFile=/sites/trinohub/automation/agent.env
+# ~/.local/bin holds the claude CLI and is not on a non-login shell's PATH.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash /sites/trinohub/automation/prepare-release.sh
+TimeoutStartSec=3600
+
+# The job works in a DEDICATED clone (RELEASE_WORKDIR, separate from the issue
+# agent's) and must never modify this working tree.
+ReadOnlyPaths=/sites/trinohub
+
+[Install]
+WantedBy=default.target

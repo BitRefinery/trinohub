@@ -1,5 +1,18 @@
-# systemd service — one shot of the issue agent. Paired with trinohub-agent.timer.
-# Install to ~/.config/systemd/user/ (user service) or /etc/systemd/system/ (edit User=).
+# systemd USER service — one shot of the issue agent. Paired with trinohub-agent.timer.
+#
+# Install (as the user that owns the clone and the gh/claude credentials):
+#   mkdir -p ~/.config/systemd/user
+#   cp /sites/trinohub/automation/trinohub-agent.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trinohub-agent.timer
+#   loginctl enable-linger "$USER"   # REQUIRED: fire while nobody is logged in
+#
+# This is a user unit on purpose: everything it needs is user-scoped (the claude
+# binary in ~/.local/bin, its credentials in ~/.claude, gh's token in ~/.config/gh)
+# and it needs no privilege at all. If you relocate the repo, change the absolute
+# paths below — they are deliberately absolute, not %h-relative, because the
+# checkout is at /sites/trinohub and not under the home directory.
+
 [Unit]
 Description=TrinoHub issue agent (headless Claude Code on triaged issues)
 After=network-online.target
@@ -7,9 +20,19 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Point this at where you cloned the repo:
-WorkingDirectory=%h/trinohub/automation
-EnvironmentFile=%h/trinohub/automation/agent.env
-ExecStart=/usr/bin/env bash %h/trinohub/automation/run-agent.sh
+WorkingDirectory=/sites/trinohub/automation
+EnvironmentFile=/sites/trinohub/automation/agent.env
+# ~/.local/bin holds the claude CLI and is not on a non-login shell's PATH.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash /sites/trinohub/automation/run-agent.sh
 # Keep the agent from wedging forever:
 TimeoutStartSec=3600
+
+# The agent works in a DEDICATED clone and must never modify this working tree.
+# run-agent.sh refuses to run if WORKDIR is inside the repo; this enforces the
+# same invariant at the kernel level, so a misconfigured agent.env cannot damage
+# the checkout even if the script's own guard were bypassed.
+ReadOnlyPaths=/sites/trinohub
+
+[Install]
+WantedBy=default.target
