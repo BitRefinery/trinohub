@@ -12,6 +12,13 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Fixed
 
+- **Importing `trinohub.api` no longer opens the database.** `app = create_app()`
+  ran at module scope, so importing the module for its helpers — which the test
+  suite does — constructed a full application against `TRINOHUB_DB`, creating
+  tables and running the seeded-admin privilege sync. On a live control-plane
+  host that meant running the tests wrote to the operator's real database. The
+  ASGI app is now built lazily on attribute access, so `uvicorn trinohub.api:app`
+  is unchanged while a plain import has no side effects.
 - **Catalog connection details are no longer visible to every signed-in user.**
   `GET /api/catalogs` listed every catalog with its full config to any
   authenticated caller, regardless of catalog grants — disclosing database
