@@ -1224,6 +1224,13 @@ label span {
   overflow: auto;
 }
 
+/* A search field placed directly inside a panel (Data products) needs the same
+   inset as the panel's other content; elsewhere it sits in a .toolbar outside
+   the panel and supplies its own spacing. */
+.panel > .search-field {
+  margin: 0 18px 16px;
+}
+
 .table-panel tr.selected td {
   background: color-mix(in srgb, var(--brand) 8%, transparent);
 }
@@ -5875,8 +5882,12 @@ code {
   max-width: 940px;
 }
 
+/* .mcp-hint is reused outside the MCP view (Data products, Query templates),
+   where the parent is a plain .panel. Key the inset off .panel so the hint is
+   never flush against the panel border; .mcp-panel is always a .panel too, so
+   the MCP view is unaffected. The rest of these classes are MCP-only. */
+.panel > .mcp-hint,
 .mcp-panel > .mcp-lede,
-.mcp-panel > .mcp-hint,
 .mcp-panel > .connect-fields,
 .mcp-panel > .mcp-actions,
 .mcp-panel > .mcp-snippet,
