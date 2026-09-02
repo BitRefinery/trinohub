@@ -1996,4 +1996,19 @@ def create_app(
     return api
 
 
-app = create_app()
+# Built lazily, not at import. ``uvicorn trinohub.api:app`` resolves this via
+# getattr and gets a real app; importing the module for its helpers — as the
+# tests do — must NOT construct one, because create_app() opens the database at
+# TRINOHUB_DB/DEFAULT_DB_PATH and runs schema creation and the admin privilege
+# sync against it. On a live control-plane host that meant simply running the
+# test suite wrote to the operator's real database.
+_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        global _app
+        if _app is None:
+            _app = create_app()
+        return _app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

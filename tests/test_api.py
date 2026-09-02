@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,6 +124,54 @@ class AsgiClient:
 
 
 @unittest.skipIf(create_app is None, "FastAPI dependencies are not installed")
+class ImportSideEffectTests(unittest.TestCase):
+    """Importing trinohub.api must not touch a database.
+
+    ``app = create_app()`` used to run at module scope, so importing the module
+    for its helpers opened TRINOHUB_DB and ran schema creation plus the admin
+    privilege sync against it. On a live control-plane host, running the test
+    suite therefore wrote to the operator's real database.
+    """
+
+    def test_importing_the_api_module_does_not_open_the_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "must-not-be-created.sqlite3"
+            env = dict(os.environ, TRINOHUB_DB=str(db))
+            result = subprocess.run(
+                [sys.executable, "-c", "import trinohub.api"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(
+                db.exists(),
+                "importing trinohub.api created the database; the ASGI app must stay lazy",
+            )
+
+    def test_the_asgi_app_is_still_reachable_as_an_attribute(self):
+        """uvicorn resolves ``trinohub.api:app`` by getattr; keep that working."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "built-on-access.sqlite3"
+            env = dict(os.environ, TRINOHUB_DB=str(db))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import trinohub.api as m; a = m.app; print(type(a).__name__); print(m.app is a)",
+                ],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("FastAPI", result.stdout)
+            self.assertIn("True", result.stdout, "the app should be built once and cached")
+            self.assertTrue(db.exists(), "accessing .app should build a real app")
+
+
 class FastApiRouteTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
