@@ -21,7 +21,7 @@ all from one box, with no static AWS credentials and a Trino-aware autoscaler.
 
 ## What is TrinoHub?
 
-TrinoHub ships as a **control-plane AMI**: a single EC2 instance running the TrinoHub
+TrinoHub runs as a **single control-plane host**: one EC2 instance serving the TrinoHub
 UI + API, a local SQLite database, and an AWS orchestration service. It installs **into your
 own VPC**, so clusters and query data stay inside your AWS account — nothing routes through a
 TrinoHub-hosted service. From that one box, operators launch and manage **separate EC2-based
@@ -144,8 +144,15 @@ nodes fetch signed, per-cluster bootstrap config over the private network.
 
 ## Install
 
-TrinoHub provisions real AWS infrastructure, so the intended way to run it is **on
-AWS in your own account**. A local install is available for development.
+TrinoHub provisions real AWS infrastructure, so **every install needs AWS credentials
+and a VPC** — first-run setup validates STS, EC2, Auto Scaling, and CloudWatch and runs
+an EC2 launch dry-run before it will let you finish. Three ways to get there:
+
+| Path | Use it when |
+|---|---|
+| **[CloudFormation stack](#deploy-on-aws-recommended)** | You want the fastest working install — the stack builds the IAM roles, security group, and host for you. |
+| **[Bring your own host](#bring-your-own-host)** | You already manage EC2 with Terraform/Ansible or golden images, or CloudFormation is restricted in your account. |
+| **[Local development](#run-locally-development)** | You're hacking on the app or running the tests. No AWS needed. |
 
 ### Deploy on AWS (recommended)
 
@@ -167,6 +174,45 @@ Then open the stack's **`UiUrl`** output and complete the setup wizard. Full
 step-by-step (console + CLI, retrieving the first-run setup token via SSM, teardown):
 
 **➡️ [`deploy/aws/README.md`](deploy/aws/README.md)**
+
+### Bring your own host
+
+The control plane is a plain Python app — FastAPI, SQLite, and static files, with no
+build step. The CloudFormation stack only automates what you can do by hand: it boots a
+stock Ubuntu 24.04 AMI and runs the same `apt` → venv → systemd steps documented in
+[`deploy/README.md`](deploy/README.md). So if CloudFormation is off the table, install
+it directly on any Ubuntu 24.04 host:
+
+```bash
+sudo apt-get install -y python3-venv python3-pip nginx
+git clone https://github.com/BitRefinery/trinohub.git /sites/trinohub
+cd /sites/trinohub && python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+# the shipped unit runs as user `trinohub` from /sites/trinohub — see deploy/README.md
+sudo cp deploy/trinohub.service /etc/systemd/system/
+sudo systemctl enable --now trinohub
+```
+
+Two things the host needs, because they're what the stack would otherwise set up:
+
+- **The control-plane instance profile attached** — `TrinoHubControlPlaneRole` with
+  [`deploy/iam-control-plane-policy.json`](deploy/iam-control-plane-policy.json), plus
+  `TrinoHubNodeRole` for `iam:PassRole`. Instance-profile auth is the supported model:
+  boto3's default credential chain means static keys *do* work, but they give up the
+  "no AWS keys, ever" guarantee the security model is built on.
+- **Network reach to the clusters it launches** — nodes fetch signed config from the
+  control plane on port `8000`, and the control plane polls coordinators on `8080`. The
+  host should sit in, or be routed to, the VPC where clusters run.
+
+Running the control plane **off EC2 entirely** works but degrades. Without EC2 instance
+metadata it can't discover its own private IP or security groups, so it won't auto-authorize
+node ↔ control-plane traffic (you add those security-group rules yourself), and node config
+gets embedded in EC2 user data instead of fetched over a signed URL.
+
+Full walkthrough — systemd, nginx, IAM, the first-run setup token, the UI CIDR allowlist,
+and AMI-hygiene notes:
+
+**➡️ [`deploy/README.md`](deploy/README.md)**
 
 ### Run locally (development)
 
@@ -230,7 +276,7 @@ FastAPI route tests if dependencies are missing):
 - [`docs/accelerated-clusters.md`](docs/accelerated-clusters.md) — object-store caching on NVMe for S3 / Iceberg / Delta catalogs, and when it pays off.
 - [`docs/settings-and-security.md`](docs/settings-and-security.md) — settings and the security model.
 - [`deploy/aws/README.md`](deploy/aws/README.md) — **deploy on AWS with the CloudFormation stack** (recommended install).
-- [`deploy/README.md`](deploy/README.md) — service, nginx, IAM, and AMI deployment notes.
+- [`deploy/README.md`](deploy/README.md) — **install on a host you manage yourself** — systemd, nginx, IAM, setup token, and AMI notes.
 - [`deploy/VALIDATION.md`](deploy/VALIDATION.md) — clean-account validation gate (launches billable AWS resources; requires explicit billing confirmation).
 - [`CHANGELOG.md`](CHANGELOG.md) — release history, notable changes, and per-release upgrade notes.
 - [`docs/releasing.md`](docs/releasing.md) — maintainer release checklist and upgrade procedure.
@@ -239,9 +285,17 @@ FastAPI route tests if dependencies are missing):
 
 ## Non-goals
 
-Multi-cloud, Kubernetes, BYO Terraform, SSO/OAuth, fine-grained data permissions, billing,
-replicated clusters, query routing, and replicating any commercial managed-Trino product's
-UI or trademarks are kept deliberately out of scope.
+Kubernetes, billing/chargeback, replicated clusters, query routing, and replicating any
+commercial managed-Trino product's UI or trademarks are kept deliberately out of scope.
+
+TrinoHub also doesn't ship Terraform or Helm modules. You can absolutely run the control
+plane on a host you provision yourself (see **[Bring your own host](#bring-your-own-host)**)
+— the infrastructure-as-code around it is just yours to own, not something TrinoHub
+generates.
+
+**Not out of scope, only not built yet:** a second cloud provider. AWS is the only
+implementation today, but `trinohub/cloud_provider.py` is a deliberate seam for adding
+another — tracked in [#7](https://github.com/BitRefinery/trinohub/issues/7).
 
 ---
 
