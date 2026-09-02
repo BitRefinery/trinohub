@@ -45,7 +45,7 @@ Parameters:
     Description: Git URL to clone TrinoHub from.
   GitRef:
     Type: String
-    Default: v0.3.0
+    Default: v0.4.0
     Description: Release tag, branch, or commit to deploy. Release tags are recommended.
   WarehouseBucket:
     Type: String
