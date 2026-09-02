@@ -11,11 +11,31 @@ all from one box, with no static AWS credentials and a Trino-aware autoscaler.
 
 <sub>MANAGED TRINO CLUSTERS · FastAPI + boto3 + SQLite · managed-platform workflow, original implementation</sub>
 
-**[trinohub.org](https://trinohub.org)** · [GitHub](https://github.com/BitRefinery/trinohub)
+**[Live demo](https://demo.trinohub.org)** · **[trinohub.org](https://trinohub.org)** · [GitHub](https://github.com/BitRefinery/trinohub)
 
 </div>
 
 ![TrinoHub clusters view](docs/images/02-clusters.png)
+
+---
+
+## Try it
+
+**[demo.trinohub.org](https://demo.trinohub.org)** — sign in as **`demo`** / **`trinohub-demo`**.
+
+A real TrinoHub install, not a mockup. Browse clusters and catalogs, open the SQL
+editor, notebooks, Ask Trino, the MCP page and the docs — then **run actual SQL**
+against the `tpch` and `tpcds` sample catalogs.
+
+The demo cluster is suspended when idle. Running a query **starts it
+automatically**, so your first query takes a minute or two to come back while the
+cluster boots; after that it is quick. That auto-resume is a real TrinoHub
+feature, not a demo shim.
+
+The demo account is read-only by design: it cannot create, start or delete
+clusters, add catalogs, or change settings, and it reaches only the sample
+catalogs. To see the parts it can't reach, [run it yourself](#install) — there is
+nothing different about the build.
 
 ---
 
