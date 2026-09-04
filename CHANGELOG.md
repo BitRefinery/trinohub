@@ -10,6 +10,25 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-04
+
+### Added
+
+- **The TLS gateway serves the TrinoHub UI at the base domain.** Setting a base
+  domain already minted a Let's Encrypt certificate for it, but nothing was
+  routed there, so the name answered with the "no running cluster" fallback. The
+  base domain now proxies to the control plane, giving the UI an HTTPS hostname
+  (`https://trino.example.com/`) while clusters keep their subdomains
+  (`https://lakehouse.trino.example.com/`). The UI route sits behind the same
+  allowed-UI-CIDR gate as the rest of the proxy, and a cluster whose hostname
+  override *is* the base domain still wins the route. The control-plane upstream
+  defaults to `127.0.0.1:8000` and is overridable with
+  `TRINOHUB_CONTROL_PLANE_UPSTREAM`.
+- **A live demo is linked from the README.** `demo.trinohub.org` is a real
+  install of the current release with a read-only account and the `tpch` and
+  `tpcds` sample catalogs, so TrinoHub can be evaluated before provisioning any
+  AWS infrastructure.
+
 ### Fixed
 
 - **Importing `trinohub.api` no longer opens the database.** `app = create_app()`
@@ -19,6 +38,14 @@ Anything landing on `main` between releases goes under **Unreleased**.
   host that meant running the tests wrote to the operator's real database. The
   ASGI app is now built lazily on attribute access, so `uvicorn trinohub.api:app`
   is unchanged while a plain import has no side effects.
+- **Data products and Query templates: the section descriptions no longer run to
+  the edge of their panel.** Both reuse the `.mcp-hint` style, but the padding
+  that goes with it was scoped to `.mcp-panel`, so outside the MCP view the text
+  sat flush against the border while the headings and table cells were inset.
+  The search field on that screen had the same problem.
+
+### Security
+
 - **Catalog connection details are no longer visible to every signed-in user.**
   `GET /api/catalogs` listed every catalog with its full config to any
   authenticated caller, regardless of catalog grants — disclosing database
@@ -30,22 +57,33 @@ Anything landing on `main` between releases goes under **Unreleased**.
   sees only the catalogs they hold a grant for, and each config is reduced to an
   allow-list of harmless keys. **Upgrading is recommended for any install with
   non-admin accounts.**
-- **Data products and Query templates: the section descriptions no longer run to
-  the edge of their panel.** Both reuse the `.mcp-hint` style, but the padding
-  that goes with it was scoped to `.mcp-panel`, so outside the MCP view the text
-  sat flush against the border while the headings and table cells were inset.
-  The search field on that screen had the same problem.
 
-### Added
+### Upgrading
 
-- **The TLS gateway serves the TrinoHub UI at the base domain.** Setting a base
-  domain already minted a Let's Encrypt certificate for it, but nothing was
-  routed there, so the name answered with the "no running cluster" fallback. The
-  base domain now proxies to the control plane, giving the UI an HTTPS hostname
-  (`https://trino.example.com/`) while clusters keep their subdomains
-  (`https://lakehouse.trino.example.com/`). The UI route sits behind the same
-  allowed-UI-CIDR gate as the rest of the proxy, and a cluster whose hostname
-  override *is* the base domain still wins the route.
+No migration is required and no new setting has to be set. Back up `.trinohub/`
+before upgrading, and upgrade an existing instance through SSM — see the
+[AWS upgrade guide](deploy/aws/README.md#updating). New CloudFormation
+installations pin to the immutable `v0.5.0` release.
+
+Two things to attend to afterwards:
+
+- **Add a DNS record for the base domain if you use the built-in TLS gateway.**
+  The base domain now serves the TrinoHub UI, but a `*.<base-domain>` wildcard
+  does not cover the base domain itself, so add an A record for it pointing at
+  the **control-plane instance** (the wildcard points at your coordinators or the
+  load balancer in front of them). Until that record exists nothing changes:
+  cluster subdomains are unaffected. Before publishing the name, weigh two
+  things — the UI route sits behind the *same* allowed-UI-CIDR allow-list as the
+  cluster routes, so widening those ranges to reach the UI also widens who can
+  reach your clusters; and a cluster whose hostname override is exactly the base
+  domain keeps the name, with the UI route stepping aside. See
+  [Cluster domains and TLS](docs/cluster-domains.md).
+- **`GET /api/catalogs` now returns less to non-admin callers.** A caller without
+  `MANAGE_CATALOGS` sees only the catalogs they hold a grant for (plus `system`,
+  which stays browsable as cluster metadata), and each config is reduced to
+  `description`. Admin responses are unchanged. Any script or integration that
+  read connection details from this endpoint under a non-admin account needs one
+  holding `MANAGE_CATALOGS` instead.
 
 ## [0.4.0] - 2026-09-02
 
@@ -216,7 +254,8 @@ Existing instances upgrade through SSM — see the
 [AWS upgrade guide](deploy/aws/README.md#updating). Back up `.trinohub/`
 first.
 
-[Unreleased]: https://github.com/BitRefinery/trinohub/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/BitRefinery/trinohub/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/BitRefinery/trinohub/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/BitRefinery/trinohub/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BitRefinery/trinohub/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/BitRefinery/trinohub/releases/tag/v0.2.0
