@@ -38,6 +38,13 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Added
 
+- **A 5-minute auto-suspend option on the create-cluster form.** The shortest
+  interval the dropdown offered was 15 minutes, so a cluster meant to idle down
+  quickly — a demo or a scratch cluster — had to be created at 15 and then
+  edited afterwards through the cluster dialog, which takes a free-form number.
+  The API always accepted anything from 1 to 1440; only the form was narrower.
+  15 minutes remains the default selection.
+
 - **The TLS gateway serves the TrinoHub UI at the base domain.** Setting a base
   domain already minted a Let's Encrypt certificate for it, but nothing was
   routed there, so the name answered with the "no running cluster" fallback. The
