@@ -37,6 +37,12 @@ clusters, add catalogs, or change settings, and it reaches only the sample
 catalogs. To see the parts it can't reach, [run it yourself](#install) — there is
 nothing different about the build.
 
+It is also a **shared** account. Everyone signs in as the same `demo` user, so
+the SQL editor, query history and saved queries are common ground: what you type
+is visible to whoever visits next, and another visitor may be editing the same
+tab while you are in it. Treat it as a public whiteboard — don't paste anything
+you wouldn't post.
+
 ---
 
 ## What is TrinoHub?
