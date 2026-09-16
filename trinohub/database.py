@@ -613,6 +613,13 @@ MIGRATIONS = {
         "delivery_status": "TEXT NOT NULL DEFAULT ''",
         "delivery_error": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
+        # The provider's id for the sent digest. A reply's References header
+        # carries it, which is how a follow-up question is tied to its digest.
+        "delivery_message_id": "TEXT NOT NULL DEFAULT ''",
+    },
+    "email_conversations": {
+        # Set when the email replied to a scheduled-job digest.
+        "job_run_id": "INTEGER",
     },
     "users": {
         # Service accounts authenticate only via API tokens, never a password.

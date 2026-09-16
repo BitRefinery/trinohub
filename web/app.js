@@ -2035,7 +2035,9 @@ async function loadEmailQuestions() {
               <td>${escapeHtml(row.username || row.from_address)}${
                 row.username ? `<br /><small>${escapeHtml(row.from_address)}</small>` : ""
               }</td>
-              <td>${escapeHtml((row.question || row.subject || "").slice(0, 160))}</td>
+              <td>${escapeHtml((row.question || row.subject || "").slice(0, 160))}${
+                row.reply_to_job ? `<br /><small>Reply to digest ${escapeHtml(row.reply_to_job)}</small>` : ""
+              }</td>
               <td>${answer}</td>
               <td>${escapeHtml(row.status)}${row.detail ? `<br /><small>${escapeHtml(row.detail)}</small>` : ""}</td>
             </tr>`;
@@ -2555,7 +2557,13 @@ function renderJobs() {
             ? `Each recipient<br /><small>Emails ${escapeHtml(job.recipients.join(", "))}</small>`
             : escapeHtml(job.run_as_username)
         }</td>
-        <td>${escapeHtml(job.last_status || "—")}<br /><small>${escapeHtml(shortTime(job.last_run_at))}</small></td>
+        <td>${escapeHtml(job.last_status || "—")}<br /><small>${escapeHtml(shortTime(job.last_run_at))}</small>${
+          (job.recipients || []).length
+            ? `<br /><small title="Emailed follow-up questions in the last 30 days">${Number(job.follow_ups_30d || 0)} ${
+                Number(job.follow_ups_30d) === 1 ? "reply" : "replies"
+              } (30 days)</small>`
+            : ""
+        }</td>
         <td>${escapeHtml(job.enabled ? shortTime(job.next_run_at) : "—")}</td>
         <td class="actions-col">
           <button class="ghost-button" type="button" data-job-runs="${index}">Runs</button>
