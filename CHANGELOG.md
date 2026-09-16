@@ -10,6 +10,19 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+### Changed
+
+- **Data policy changes reach running clusters without a restart.** Access-control
+  rules were written into each node's Trino config only at boot, so creating a
+  policy, editing one, or adding a user to a restricted role did nothing until
+  the cluster was restarted. Nodes now pull the current rules from the control
+  plane every minute over the bootstrap-token-signed node-config endpoint, and
+  Trino re-reads the file every 30 seconds. A failed or malformed pull keeps the
+  last good rules. Nodes that can pull updates always boot with file-based access
+  control (allow-all when no policies exist), because Trino only loads that
+  setting at startup. Clusters started before this change pick it up on their
+  next start.
+
 ### Fixed
 
 - **Importing `trinohub.api` no longer opens the database.** `app = create_app()`

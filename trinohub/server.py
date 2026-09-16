@@ -333,6 +333,9 @@ UPTIME_WINDOW_PATTERN = re.compile(r"([0-2]\d):([0-5]\d)-([0-2]\d):([0-5]\d)")
 
 # --- Fine-grained data security (Phase 6) -----------------------------------
 DATA_POLICY_PRIVILEGES = ("SELECT", "INSERT", "DELETE", "UPDATE")
+# Trino's file-based access control grants everything when a rules file
+# defines no sections; nodes that can pull rule updates boot with this.
+ALLOW_ALL_ACCESS_RULES = "{}"
 TAG_POLICY_EFFECTS = ("deny", "mask")
 TAG_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,62}")
 COLUMN_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_$]{0,127}")
@@ -4559,8 +4562,28 @@ class TrinoHubApp:
             control_plane_uri=control_plane_uri,
             cluster_id=cluster_id,
             bootstrap_token=token,
-            access_control_rules=self.render_access_control_rules(cluster),
+            access_control_rules=self.node_access_rules_document(cluster, refreshable=bool(control_plane_uri)),
         )
+
+    def node_access_rules_document(self, cluster: dict[str, Any], *, refreshable: bool) -> str | None:
+        """The rules a node boots with. A node that can pull rule updates always
+        gets file-based access control — allow-all when there are no policies —
+        because Trino only reads access-control.properties at startup; without
+        it, policies created later could never reach the running cluster."""
+        rules = self.render_access_control_rules(cluster)
+        if rules is None and refreshable:
+            return ALLOW_ALL_ACCESS_RULES
+        return rules
+
+    def node_access_rules(self, cluster_id: int, token: str) -> str:
+        """Current rules for a running node's periodic pull (bootstrap-token signed)."""
+        with self.conn() as conn:
+            self.verify_cluster_bootstrap_token(conn, cluster_id, token)
+            row = conn.execute("SELECT * FROM clusters WHERE id = ?", (cluster_id,)).fetchone()
+            if not row:
+                raise ApiError(404, "Cluster not found.")
+            cluster = self.public_cluster(row)
+        return self.render_access_control_rules(cluster) or ALLOW_ALL_ACCESS_RULES
 
     def record_provider_resource(
         self,

@@ -280,6 +280,36 @@ class FastApiRouteTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("allowed UI CIDR", body["error"])
 
+    def test_node_access_rules_route_is_token_signed_and_bypasses_ui_cidrs(self):
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/setup/complete",
+            {"username": "admin", "password": "correct-horse-password", "node_instance_profile": "TrinoHubNodeRole"},
+        )
+        self.assertEqual(status, 201)
+        with self.control.conn() as conn:
+            conn.execute(
+                "INSERT INTO clusters (name, status, region, worker_mode, min_workers, max_workers,"
+                " catalogs_json, created_at, updated_at) VALUES ('rules', 'Running', 'us-east-2',"
+                " 'fixed', 0, 0, '[]', '2026-01-01', '2026-01-01')"
+            )
+            cluster_id = conn.execute("SELECT id FROM clusters WHERE name = 'rules'").fetchone()["id"]
+            token = self.control.create_cluster_bootstrap_token(conn, cluster_id)
+        status, _, _ = self.client.request(
+            "PUT", "/api/security/ui-cidrs", {"allowed_ui_cidrs": ["203.0.113.4/32"]}
+        )
+        self.assertEqual(status, 200)
+
+        status, headers, body = self.client.request(
+            "GET", f"/api/node-config/{cluster_id}/access-rules?token={token}"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["content-type"].startswith("application/json"))
+        self.assertEqual(body, {})
+
+        status, _, _ = self.client.request("GET", f"/api/node-config/{cluster_id}/access-rules?token=nope")
+        self.assertEqual(status, 403)
+
     def test_result_cache_settings_routes(self):
         # Settings privilege required: unauthenticated callers get a 401.
         status, _, _ = self.client.request("PUT", "/api/query-cache", {"result_cache_ttl_minutes": 30})
