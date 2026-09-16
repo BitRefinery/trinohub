@@ -310,6 +310,31 @@ class FastApiRouteTests(unittest.TestCase):
         status, _, _ = self.client.request("GET", f"/api/node-config/{cluster_id}/access-rules?token=nope")
         self.assertEqual(status, 403)
 
+    def test_email_settings_routes(self):
+        status, _, _ = self.client.request("PUT", "/api/email-settings", {"enabled": False})
+        self.assertEqual(status, 401)
+        status, _, _ = self.client.request(
+            "POST",
+            "/api/setup/complete",
+            {"username": "admin", "password": "correct-horse-password", "node_instance_profile": "TrinoHubNodeRole"},
+        )
+        self.assertEqual(status, 201)
+        status, _, body = self.client.request("GET", "/api/email-settings")
+        self.assertEqual(status, 200)
+        self.assertFalse(body["email"]["enabled"])
+        status, _, body = self.client.request(
+            "PUT", "/api/email-settings", {"enabled": True, "from_address": "not-an-address"}
+        )
+        self.assertEqual(status, 400)
+        status, _, body = self.client.request(
+            "PUT", "/api/email-settings", {"enabled": True, "from_address": "data@example.com"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["email"]["from_address"], "data@example.com")
+        # The seeded admin has no address to send a test to.
+        status, _, body = self.client.request("POST", "/api/email-settings/test", {})
+        self.assertEqual(status, 400)
+
     def test_result_cache_settings_routes(self):
         # Settings privilege required: unauthenticated callers get a 401.
         status, _, _ = self.client.request("PUT", "/api/query-cache", {"result_cache_ttl_minutes": 30})

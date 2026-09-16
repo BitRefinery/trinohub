@@ -327,6 +327,13 @@ NOTIFICATION_EVENTS = (
     "security",
 )
 NOTIFY_TIMEOUT_SECONDS = 5
+# Email delivery (scheduled-job digests). Digests inline a bounded preview of
+# the result; the full result stays one click away in query history.
+EMAIL_ADDRESS_PATTERN = re.compile(r"[^@\s<>()\[\],;:\"]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+AWS_REGION_PATTERN = re.compile(r"[a-z]{2}(-[a-z]+)+-\d")
+MAX_JOB_RECIPIENTS = 50
+DIGEST_MAX_ROWS = 50
+DIGEST_MAX_CELL_CHARS = 200
 COST_WINDOW_DAYS = 30
 UPTIME_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 UPTIME_WINDOW_PATTERN = re.compile(r"([0-2]\d):([0-5]\d)-([0-2]\d):([0-5]\d)")
@@ -1918,6 +1925,7 @@ class TrinoHubApp:
             "schema": row["schema_name"],
             "run_as_user_id": row["run_as_user_id"],
             "run_as_username": self._owner_username(row["run_as_user_id"]),
+            "recipients": [self._owner_username(user_id) for user_id in loads(row["recipients_json"], [])],
             "schedule_type": row["schedule_type"],
             "interval_minutes": row["interval_minutes"],
             "cron_expression": row["cron_expression"],
@@ -1966,6 +1974,38 @@ class TrinoHubApp:
             "cron_expression": cron_expression,
         }
 
+    def _resolve_job_recipients(
+        self, conn: sqlite3.Connection, recipients: Any, user: dict[str, Any]
+    ) -> list[int]:
+        """Digest recipients by username -> user ids. Each recipient's run uses
+        their own grants, so a digest never shows anyone more than they could
+        query themselves; emailing someone other than yourself still needs
+        MANAGE_USERS, the same bar as running a job as another identity."""
+        if recipients is None:
+            return []
+        if isinstance(recipients, str):
+            recipients = [part for part in re.split(r"[\s,]+", recipients) if part]
+        if not isinstance(recipients, list):
+            raise ApiError(400, "recipients must be a list of usernames.")
+        names = list(dict.fromkeys(str(name).strip() for name in recipients if str(name).strip()))
+        if len(names) > MAX_JOB_RECIPIENTS:
+            raise ApiError(400, f"A job can email at most {MAX_JOB_RECIPIENTS} recipients.")
+        if any(name != user["username"] for name in names):
+            self.require_privilege(user, PRIVILEGE_MANAGE_USERS)
+        ids: list[int] = []
+        for name in names:
+            row = conn.execute(
+                "SELECT id, email, is_service FROM users WHERE username = ? AND is_active = 1", (name,)
+            ).fetchone()
+            if not row:
+                raise ApiError(404, f"Recipient {name} not found or inactive.")
+            if row["is_service"]:
+                raise ApiError(400, f"Recipient {name} is a service account and cannot receive email.")
+            if not str(row["email"] or "").strip():
+                raise ApiError(400, f"Recipient {name} has no email address.")
+            ids.append(int(row["id"]))
+        return ids
+
     def _job_next_run(self, schedule: dict[str, Any], reference: datetime | None = None) -> str:
         now = reference or datetime.now(timezone.utc)
         if schedule["schedule_type"] == "interval":
@@ -2007,13 +2047,17 @@ class TrinoHubApp:
                 run_as_user_id = run_row["id"]
             else:
                 run_as_user_id = user["id"]
+            recipient_ids = self._resolve_job_recipients(conn, payload.get("recipients"), user)
+            if recipient_ids:
+                # A digest runs as every recipient, so it may only read.
+                validate_read_only_sql(sql_text)
             cursor = conn.execute(
                 """
                 INSERT INTO scheduled_jobs
                   (name, sql_text, cluster_id, catalog, schema_name, run_as_user_id, created_by,
                    schedule_type, interval_minutes, cron_expression, enabled, next_run_at,
-                   created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                   created_at, updated_at, recipients_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -2029,10 +2073,20 @@ class TrinoHubApp:
                     self._job_next_run(schedule),
                     now,
                     now,
+                    dumps(recipient_ids),
                 ),
             )
             row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        self.audit(user, "job.create", name, {"cluster_id": cluster_id, "run_as": self._owner_username(run_as_user_id)})
+        self.audit(
+            user,
+            "job.create",
+            name,
+            {
+                "cluster_id": cluster_id,
+                "run_as": self._owner_username(run_as_user_id),
+                "recipients": [self._owner_username(user_id) for user_id in recipient_ids],
+            },
+        )
         return {"job": self.public_job(row)}
 
     def list_jobs(self, user: dict[str, Any]) -> dict[str, Any]:
@@ -2066,6 +2120,13 @@ class TrinoHubApp:
                 updates["schema_name"] = str(payload.get("schema") or payload.get("schema_name") or "").strip()
             if "enabled" in payload:
                 updates["enabled"] = 1 if bool(payload["enabled"]) else 0
+            if payload.get("recipients") is not None:
+                updates["recipients_json"] = dumps(
+                    self._resolve_job_recipients(conn, payload["recipients"], user)
+                )
+            if loads(updates.get("recipients_json", row["recipients_json"]), []):
+                # A digest runs as every recipient, so it may only read.
+                validate_read_only_sql(updates.get("sql_text", row["sql_text"]))
             if any(key in payload for key in ("schedule_type", "interval_minutes", "cron_expression")):
                 schedule = self._normalize_job_schedule(
                     payload,
@@ -2126,6 +2187,9 @@ class TrinoHubApp:
                     "query_id": row["query_id"],
                     "attempt": row["attempt"],
                     "status": row["status"],
+                    "recipient": self._owner_username(row["recipient_user_id"]),
+                    "delivery_status": row["delivery_status"],
+                    "delivery_error": row["delivery_error"],
                     "error": row["error"] or (row["query_error"] or ""),
                     "elapsed_ms": row["elapsed_ms"],
                     "started_at": row["started_at"],
@@ -2138,22 +2202,44 @@ class TrinoHubApp:
     def run_job_now(self, job_id: int, user: dict[str, Any]) -> dict[str, Any]:
         with self.conn() as conn:
             row = self._job_for_user(conn, job_id, user)
-        run_id = self._execute_job(row_to_dict(row), attempt=1)
-        return {"run_id": run_id}
+        run_ids = self._execute_job(row_to_dict(row), attempt=1)
+        return {"run_id": run_ids[0], "run_ids": run_ids}
 
-    def _execute_job(self, job: dict[str, Any], *, attempt: int) -> int:
-        """Submit one execution of a job through the normal query path, as the
-        job's run_as user (whose grants apply). Failures to even submit are
-        recorded as failed runs rather than raised."""
+    def _execute_job(
+        self, job: dict[str, Any], *, attempt: int, recipient_ids: list[int] | None = None
+    ) -> list[int]:
+        """Submit one execution of a job. A digest job (one with recipients)
+        submits one run per recipient, as that recipient, so row filters and
+        grants shape each person's own result; otherwise it runs once as the
+        job's run_as user. ``recipient_ids`` narrows a retry to the recipient
+        whose run failed ([] = the run_as run). Returns the new run ids."""
+        if recipient_ids is None:
+            recipient_ids = [int(user_id) for user_id in loads(job.get("recipients_json") or "[]", [])]
+        if recipient_ids:
+            return [
+                self._submit_job_run(job, attempt=attempt, identity_id=user_id, recipient_id=user_id)
+                for user_id in recipient_ids
+            ]
+        return [self._submit_job_run(job, attempt=attempt, identity_id=job["run_as_user_id"], recipient_id=None)]
+
+    def _submit_job_run(
+        self, job: dict[str, Any], *, attempt: int, identity_id: int, recipient_id: int | None
+    ) -> int:
+        """Submit a single run through the normal query path as ``identity_id``.
+        Failures to even submit are recorded as failed runs rather than raised."""
         now = utc_now()
         with self.conn() as conn:
             run_as = conn.execute(
-                "SELECT * FROM users WHERE id = ? AND is_active = 1", (job["run_as_user_id"],)
+                "SELECT * FROM users WHERE id = ? AND is_active = 1", (identity_id,)
             ).fetchone()
         query_id = None
         status, error = "Running", ""
         if not run_as:
-            status, error = "Failed", "The job's run-as user no longer exists or is inactive."
+            status, error = "Failed", (
+                "The digest recipient no longer exists or is inactive."
+                if recipient_id is not None
+                else "The job's run-as user no longer exists or is inactive."
+            )
         else:
             try:
                 result = self.create_query(
@@ -2175,10 +2261,11 @@ class TrinoHubApp:
         with self.conn() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO scheduled_job_runs (job_id, query_id, attempt, status, error, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scheduled_job_runs
+                  (job_id, query_id, attempt, status, error, started_at, finished_at, recipient_user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job["id"], query_id, attempt, status, error, now, now if status == "Failed" else None),
+                (job["id"], query_id, attempt, status, error, now, now if status == "Failed" else None, recipient_id),
             )
             run_id = cursor.lastrowid
             conn.execute(
@@ -2214,8 +2301,8 @@ class TrinoHubApp:
                     "UPDATE scheduled_jobs SET next_run_at = ? WHERE id = ?",
                     (self._job_next_run(schedule, now_dt), job["id"]),
                 )
-            run_id = self._execute_job(job, attempt=1)
-            fired.append({"job_id": job["id"], "run_id": run_id})
+            for run_id in self._execute_job(job, attempt=1):
+                fired.append({"job_id": job["id"], "run_id": run_id})
         self._finalize_job_runs()
         return fired
 
@@ -2227,7 +2314,8 @@ class TrinoHubApp:
                 row_to_dict(row)
                 for row in conn.execute(
                     """
-                    SELECT r.*, j.run_as_user_id FROM scheduled_job_runs r
+                    SELECT r.*, COALESCE(r.recipient_user_id, j.run_as_user_id) AS identity_user_id
+                    FROM scheduled_job_runs r
                     JOIN scheduled_jobs j ON j.id = r.job_id
                     WHERE r.status = 'Running'
                     """
@@ -2237,7 +2325,7 @@ class TrinoHubApp:
             if not run["query_id"]:
                 continue
             with self.conn() as conn:
-                run_as = conn.execute("SELECT * FROM users WHERE id = ?", (run["run_as_user_id"],)).fetchone()
+                run_as = conn.execute("SELECT * FROM users WHERE id = ?", (run["identity_user_id"],)).fetchone()
             if not run_as:
                 continue
             try:
@@ -2259,8 +2347,11 @@ class TrinoHubApp:
                     "UPDATE scheduled_jobs SET last_status = ? WHERE id = ?", (status, run["job_id"])
                 )
                 job_row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (run["job_id"],)).fetchone()
+            if status == "Succeeded" and run["recipient_user_id"] and job_row:
+                self._deliver_job_run(run["id"], row_to_dict(job_row), row_to_dict(run_as), run["query_id"])
             if status == "Failed" and run["attempt"] == 1 and job_row:
-                self._execute_job(row_to_dict(job_row), attempt=2)
+                retry_for = [run["recipient_user_id"]] if run["recipient_user_id"] else []
+                self._execute_job(row_to_dict(job_row), attempt=2, recipient_ids=retry_for)
             elif status == "Failed" and job_row:
                 # The retry failed too — this run is final.
                 self.notify(
@@ -2268,6 +2359,105 @@ class TrinoHubApp:
                     f"Scheduled job {job_row['name']} failed after retry: {error}",
                     {"job": job_row["name"]},
                 )
+
+    def _deliver_job_run(
+        self, run_id: int, job: dict[str, Any], recipient: dict[str, Any], query_id: int
+    ) -> None:
+        """Email one recipient their own result. Never raises: a delivery
+        failure is recorded on the run and must not stall the scheduler."""
+        status, error = "sent", ""
+        try:
+            address = str(recipient.get("email") or "").strip()
+            if not address:
+                raise ApiError(400, "The recipient has no email address.")
+            with self.conn() as conn:
+                query = conn.execute("SELECT * FROM query_runs WHERE id = ?", (query_id,)).fetchone()
+            if not query:
+                raise ApiError(404, "The run's query record is gone.")
+            message = self.render_digest_email(job, row_to_dict(query))
+            self.send_email([address], message["subject"], message["text"], message["html"])
+        except ApiError as exc:
+            status, error = "failed", exc.message
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Digest delivery failed: {type(exc).__name__}: {exc}")
+            status, error = "failed", "an unexpected internal error (check the service logs)."
+        with self.conn() as conn:
+            conn.execute(
+                "UPDATE scheduled_job_runs SET delivery_status = ?, delivery_error = ?, delivered_at = ? WHERE id = ?",
+                (status, error, utc_now(), run_id),
+            )
+        if status == "failed":
+            self.notify(
+                "job_failed",
+                f"Scheduled job {job['name']} could not email {recipient.get('username', '')}: {error}",
+                {"job": job["name"]},
+            )
+
+    def render_digest_email(self, job: dict[str, Any], query: dict[str, Any]) -> dict[str, str]:
+        """Subject, plain-text and HTML bodies for one digest. Shows at most
+        DIGEST_MAX_ROWS rows; every value is escaped for the HTML part."""
+        import html as html_lib
+
+        columns = [
+            str(column.get("name") if isinstance(column, dict) else column)
+            for column in loads(query.get("columns_json") or "[]", [])
+        ]
+        rows = loads(query.get("data_json") or "[]", [])
+        total = int(query.get("total_row_count") or len(rows))
+        shown = rows[:DIGEST_MAX_ROWS]
+
+        def cell(value: Any) -> str:
+            text = "" if value is None else (value if isinstance(value, str) else json.dumps(value))
+            return text if len(text) <= DIGEST_MAX_CELL_CHARS else text[: DIGEST_MAX_CELL_CHARS - 1] + "…"
+
+        ran_at = str(query.get("updated_at") or utc_now())[:16].replace("T", " ")
+        subject = f"{job['name']} — {ran_at[:10]}"
+        count_line = (
+            f"Showing {len(shown)} of {total} rows."
+            if total > len(shown)
+            else f"{total} row{'s' if total != 1 else ''}."
+        )
+        public_url = self.email_settings()["public_url"]
+        link = f"{public_url}/#history/{query['id']}" if public_url else ""
+        footer = (
+            f"You receive this as a recipient of the scheduled job \"{job['name']}\". "
+            "The results reflect your own data access."
+        )
+
+        text_lines = [job["name"], f"Ran {ran_at} UTC. {count_line}", ""]
+        if columns:
+            text_lines.append(" | ".join(columns))
+            text_lines.extend(" | ".join(cell(value) for value in row) for row in shown)
+        else:
+            text_lines.append("The query returned no result columns.")
+        text_lines.append("")
+        if link:
+            text_lines.append(f"Open in query history: {link}")
+        text_lines.append(footer)
+
+        escape = html_lib.escape
+        cell_style = "border:1px solid #d9d9e3;padding:4px 8px;text-align:left;font-size:13px"
+        if columns:
+            header_html = "".join(f'<th style="{cell_style};background:#f4f3fb">{escape(name)}</th>' for name in columns)
+            body_html = "".join(
+                "<tr>" + "".join(f'<td style="{cell_style}">{escape(cell(value))}</td>' for value in row) + "</tr>"
+                for row in shown
+            )
+            table_html = (
+                f'<table style="border-collapse:collapse;margin:12px 0"><thead><tr>{header_html}</tr></thead>'
+                f"<tbody>{body_html}</tbody></table>"
+            )
+        else:
+            table_html = "<p>The query returned no result columns.</p>"
+        link_html = f'<p><a href="{escape(link, quote=True)}">Open in query history</a></p>' if link else ""
+        html_body = (
+            '<div style="font-family:Arial,Helvetica,sans-serif;color:#1f1d2b">'
+            f'<h2 style="margin:0 0 4px;font-size:18px">{escape(job["name"])}</h2>'
+            f'<p style="margin:0;color:#5c5a6b;font-size:13px">Ran {escape(ran_at)} UTC. {escape(count_line)}</p>'
+            f"{table_html}{link_html}"
+            f'<p style="color:#5c5a6b;font-size:12px">{escape(footer)}</p></div>'
+        )
+        return {"subject": subject, "text": "\n".join(text_lines), "html": html_body}
 
     # --- Metadata cache, autocomplete & global search (Phase 3) ---------------
 
@@ -2797,6 +2987,75 @@ class TrinoHubApp:
             conn.execute("UPDATE setup_settings SET notification_config_json = ? WHERE id = 1", (dumps(config),))
         self.audit(actor, "settings.notifications", webhook_url and "webhook", {"events": config["events"]})
         return {"notifications": self.notification_settings()}
+
+    def email_settings(self) -> dict[str, Any]:
+        """Outbound email config. Delivery goes through the cloud provider
+        (Amazon SES on AWS) using the control plane's own role — no SMTP
+        credentials are stored."""
+        setup = self.setup_row()
+        config = loads(setup.get("email_config_json", "{}"), {}) if setup else {}
+        return {
+            "enabled": bool(config.get("enabled")),
+            "from_address": str(config.get("from_address") or ""),
+            "region": str(config.get("region") or ""),
+            "public_url": str(config.get("public_url") or ""),
+        }
+
+    def set_email_settings(self, payload: dict[str, Any], actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        setup = self.setup_row()
+        if not setup:
+            raise ApiError(409, "Complete setup before configuring email.")
+        current = self.email_settings()
+        enabled = bool(payload.get("enabled", current["enabled"]))
+        from_address = str(payload.get("from_address", current["from_address"]) or "").strip()
+        region = str(payload.get("region", current["region"]) or "").strip()
+        public_url = str(payload.get("public_url", current["public_url"]) or "").strip().rstrip("/")
+        if from_address and not EMAIL_ADDRESS_PATTERN.fullmatch(from_address):
+            raise ApiError(400, "from_address must be a plain email address, for example data@example.com.")
+        if enabled and not from_address:
+            raise ApiError(400, "Set a from_address before enabling email.")
+        if region and not AWS_REGION_PATTERN.fullmatch(region):
+            raise ApiError(400, "region must be an AWS region id such as us-east-1.")
+        if public_url and not public_url.startswith(("https://", "http://")):
+            raise ApiError(400, "public_url must be an http(s) URL.")
+        config = {"enabled": enabled, "from_address": from_address, "region": region, "public_url": public_url}
+        with self.conn() as conn:
+            conn.execute("UPDATE setup_settings SET email_config_json = ? WHERE id = 1", (dumps(config),))
+        self.audit(actor, "settings.email", from_address, {"enabled": enabled, "region": region})
+        return {"email": self.email_settings()}
+
+    def send_email(self, to_addresses: list[str], subject: str, text_body: str, html_body: str = "") -> dict[str, Any]:
+        """Send through the provider, raising ApiError with an operator-safe
+        message on misconfiguration or provider failure."""
+        config = self.email_settings()
+        if not config["enabled"] or not config["from_address"]:
+            raise ApiError(409, "Email delivery is not enabled. Configure it in Settings.")
+        setup = self.setup_row() or {}
+        region = config["region"] or str(setup.get("region") or "") or self.aws.region
+        try:
+            return self.aws.send_email(
+                region=region,
+                from_address=config["from_address"],
+                to_addresses=to_addresses,
+                subject=subject,
+                text_body=text_body,
+                html_body=html_body,
+            )
+        except Exception as exc:
+            print(f"Email send failed: {type(exc).__name__}: {exc}")
+            raise ApiError(502, f"Email send failed: {self._safe_aws_error(exc)}") from None
+
+    def send_test_email(self, actor: dict[str, Any]) -> dict[str, Any]:
+        address = str(actor.get("email") or "").strip()
+        if not address:
+            raise ApiError(400, "Your account has no email address to send a test to.")
+        self.send_email(
+            [address],
+            "TrinoHub test email",
+            "Email delivery from TrinoHub is working. Scheduled-job digests will arrive from this address.",
+        )
+        self.audit(actor, "settings.email.test", address)
+        return {"sent": True, "to": address}
 
     def ask_trino_settings(self) -> dict[str, Any]:
         """Ask Trino model config. The operator pastes an OpenRouter model id in

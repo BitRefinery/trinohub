@@ -17,6 +17,9 @@ Click **Create job** and set:
   expression** (standard five fields: minute, hour, day-of-month, month,
   day-of-week, in UTC). For example `0 3 * * *` runs at 03:00 every day.
 
+- **Email results to** (optional) — usernames to send each run's result to.
+  See **Email digests** below.
+
 ## How runs work
 
 A background scheduler checks every 30 seconds and fires any due job. Each run
@@ -41,3 +44,28 @@ By default a job runs as **you**, with your grants. If you have the
 `MANAGE_USERS` privilege you can set **run as** to another user — typically a
 **service account** — so the job's access is tied to an automation identity
 rather than a personal login. See **Users & roles**.
+
+## Email digests
+
+Give a job **recipients** and it becomes a digest: every time it fires, the
+job runs **once per recipient, as that recipient**, and emails each person their
+own result. Because each run uses the recipient's own grants, data policies
+and row filters apply per person — a store manager whose role filters to their
+store receives only that store's rows, even though everyone shares one job.
+The run-as setting is ignored for digests.
+
+Rules:
+
+- A digest must be a **read-only** statement (`SELECT`/`WITH`), since it runs
+  under other people's identities.
+- Recipients must be active, non-service users with an email address. Adding
+  anyone other than yourself requires `MANAGE_USERS`.
+- The email shows up to 50 rows inline, the row count, and — when a public URL
+  is configured — a link that opens the query in the recipient's
+  **Query history**.
+- A failed run is retried once for that recipient only. Delivery failures are
+  recorded on the run (**Runs → Email**) and sent to the notification webhook
+  as `job_failed`; they never stop the scheduler.
+
+Email must be enabled in **Settings → Email** first (see **Settings &
+security**).

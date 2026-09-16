@@ -18,6 +18,7 @@ ADMIN_VIEWER = {"id": 1, "role": "admin"}
 
 class FakeAws:
     def __init__(self):
+        self.sent_emails = []
         self.cleanup_calls = []
         self.health_calls = []
         self.scaling_calls = []
@@ -57,6 +58,10 @@ class FakeAws:
 
     def control_plane_private_ip(self):
         return "10.0.9.9"
+
+    def send_email(self, **kwargs):
+        self.sent_emails.append(kwargs)
+        return {"message_id": f"msg-{len(self.sent_emails)}"}
 
     def full_status(self, region=None):
         return {
@@ -5598,6 +5603,197 @@ class QueryPlatformTests(unittest.TestCase):
         self.assertGreater(refreshed["next_run_at"], "2020-01-01")
         # Not due any more: a second poll fires nothing.
         self.assertEqual(self.app.poll_scheduled_jobs_once(), [])
+
+    # --- email digests ------------------------------------------------------------
+
+    def _enable_email(self):
+        self.app.set_email_settings(
+            {
+                "enabled": True,
+                "from_address": "data@example.com",
+                "region": "us-east-1",
+                "public_url": "https://trinohub.example.com/",
+            },
+            self.admin,
+        )
+
+    def _make_mail_user(self, username, email):
+        self.app.create_user(
+            {"username": username, "password": "pw-123456789", "roles": ["user"], "email": email}, self.admin
+        )
+        return self._user(username)
+
+    def _stub_query_path(self, statuses=None):
+        """Replace the Trino query path: create_query records who ran what and
+        stores a result row; advance_query_run reports a scripted status."""
+        submitted = []
+        statuses = statuses or {}
+
+        def create_query(payload, user):
+            with self.app.conn() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO query_runs (user_id, cluster_id, sql_text, status, columns_json, data_json,
+                                            row_count, total_row_count, created_at, updated_at)
+                    VALUES (?, ?, ?, 'Running', ?, ?, 1, 1, '2026-09-16T07:00:00+00:00', '2026-09-16T07:00:05+00:00')
+                    """,
+                    (
+                        user["id"],
+                        payload["cluster_id"],
+                        payload["sql"],
+                        json.dumps([{"name": "store"}, {"name": "net_sales"}]),
+                        json.dumps([[f"<b>{user['username']}</b>", 1234.5]]),
+                    ),
+                )
+                query_id = cursor.lastrowid
+            submitted.append({"user": user["username"], "query_id": query_id})
+            return {"query": {"id": query_id, "status": "Running"}}
+
+        def advance_query_run(query_id, user, max_pages=1):
+            script = statuses.get(user["username"], ["Finished"])
+            status = script.pop(0) if len(script) > 1 else script[0]
+            return {"query": {"id": query_id, "status": status, "error_message": "boom" if status == "Failed" else ""}}
+
+        self.app.create_query = create_query
+        self.app.advance_query_run = advance_query_run
+        return submitted
+
+    def _digest_job(self, recipients, sql="SELECT store, net_sales FROM sales"):
+        job = self.app.create_job(
+            {"name": "Daily sales", "sql": sql, "cluster_id": self.cluster["id"],
+             "schedule_type": "cron", "cron_expression": "0 7 * * *", "recipients": recipients},
+            self.admin,
+        )["job"]
+        with self.app.conn() as conn:
+            conn.execute(
+                "UPDATE scheduled_jobs SET next_run_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", job["id"])
+            )
+        return job
+
+    def test_email_settings_validation_and_test_send(self):
+        with self.assertRaises(ApiError):
+            self.app.set_email_settings({"enabled": True}, self.admin)
+        with self.assertRaises(ApiError):
+            self.app.set_email_settings({"from_address": "Data <data@example.com>"}, self.admin)
+        with self.assertRaises(ApiError):
+            self.app.set_email_settings({"from_address": "data@example.com", "region": "moon-1"}, self.admin)
+        with self.assertRaises(ApiError):
+            self.app.set_email_settings({"from_address": "data@example.com", "public_url": "ftp://x"}, self.admin)
+        with self.assertRaises(ApiError) as ctx:
+            self.app.send_email(["someone@example.com"], "s", "t")
+        self.assertEqual(ctx.exception.status, 409)
+
+        self._enable_email()
+        settings = self.app.email_settings()
+        self.assertEqual(settings["public_url"], "https://trinohub.example.com")
+        with self.assertRaises(ApiError):
+            self.app.send_test_email(self.admin)  # the seeded admin has no email
+        tester = self._make_mail_user("tess", "tess@example.com")
+        self.assertEqual(self.app.send_test_email(tester), {"sent": True, "to": "tess@example.com"})
+        sent = self.app.aws.sent_emails[-1]
+        self.assertEqual(sent["from_address"], "data@example.com")
+        self.assertEqual(sent["region"], "us-east-1")
+        self.assertEqual(sent["to_addresses"], ["tess@example.com"])
+
+    def test_job_recipient_validation(self):
+        dana = self._make_mail_user("dana", "dana@example.com")
+        self._make_mail_user("eli", "eli@example.com")
+        self._make_user("nomail")
+        self.app.create_user({"username": "bot", "is_service": True, "roles": ["user"]}, self.admin)
+        base = {"name": "digest", "sql": "SELECT 1", "cluster_id": self.cluster["id"],
+                "schedule_type": "interval", "interval_minutes": 60}
+
+        # Emailing only yourself needs no extra privilege.
+        own = self.app.create_job({**base, "recipients": ["dana"]}, dana)["job"]
+        self.assertEqual(own["recipients"], ["dana"])
+        with self.assertRaises(ApiError) as ctx:
+            self.app.create_job({**base, "recipients": ["eli"]}, dana)
+        self.assertEqual(ctx.exception.status, 403)
+        for bad in (["ghost"], ["nomail"], ["bot"]):
+            with self.assertRaises(ApiError):
+                self.app.create_job({**base, "recipients": bad}, self.admin)
+        # A digest runs as each recipient, so it must be read-only.
+        with self.assertRaises(ApiError):
+            self.app.create_job({**base, "sql": "DELETE FROM sales", "recipients": ["dana"]}, self.admin)
+        plain = self.app.create_job({**base, "sql": "DELETE FROM staging"}, self.admin)["job"]
+        with self.assertRaises(ApiError):
+            self.app.update_job(plain["id"], {"recipients": ["dana"]}, self.admin)
+
+        updated = self.app.update_job(own["id"], {"recipients": ["dana", "eli", "dana"]}, self.admin)["job"]
+        self.assertEqual(updated["recipients"], ["dana", "eli"])
+        cleared = self.app.update_job(own["id"], {"recipients": []}, self.admin)["job"]
+        self.assertEqual(cleared["recipients"], [])
+
+    def test_digest_runs_once_per_recipient_as_that_recipient_and_emails_each(self):
+        self._enable_email()
+        self._make_mail_user("dana", "dana@example.com")
+        self._make_mail_user("eli", "eli@example.com")
+        submitted = self._stub_query_path()
+        job = self._digest_job(["dana", "eli"])
+
+        fired = self.app.poll_scheduled_jobs_once()
+        self.assertEqual(len(fired), 2)
+        # Each recipient's run was submitted under their own identity, so
+        # Trino row filters apply per person.
+        self.assertEqual(sorted(entry["user"] for entry in submitted), ["dana", "eli"])
+        self.assertEqual({email["to_addresses"][0] for email in self.app.aws.sent_emails},
+                         {"dana@example.com", "eli@example.com"})
+
+        dana_mail = next(e for e in self.app.aws.sent_emails if e["to_addresses"] == ["dana@example.com"])
+        self.assertEqual(dana_mail["subject"], "Daily sales — 2026-09-16")
+        self.assertIn("&lt;b&gt;dana&lt;/b&gt;", dana_mail["html_body"])
+        self.assertNotIn("<b>dana</b>", dana_mail["html_body"])
+        dana_query = next(entry["query_id"] for entry in submitted if entry["user"] == "dana")
+        self.assertIn(f"https://trinohub.example.com/#history/{dana_query}", dana_mail["text_body"])
+        self.assertNotIn("eli", dana_mail["text_body"])
+
+        runs = self.app.list_job_runs(job["id"], self.admin)["runs"]
+        self.assertEqual(sorted(run["recipient"] for run in runs), ["dana", "eli"])
+        self.assertTrue(all(run["status"] == "Succeeded" and run["delivery_status"] == "sent" for run in runs))
+        # Settled runs are not delivered twice.
+        self.app.poll_scheduled_jobs_once()
+        self.assertEqual(len(self.app.aws.sent_emails), 2)
+
+    def test_digest_retry_is_scoped_to_the_failed_recipient(self):
+        self._enable_email()
+        self._make_mail_user("dana", "dana@example.com")
+        self._make_mail_user("eli", "eli@example.com")
+        submitted = self._stub_query_path({"dana": ["Failed", "Finished"]})
+        job = self._digest_job(["dana", "eli"])
+
+        self.app.poll_scheduled_jobs_once()
+        # dana's first attempt failed and was retried for dana alone.
+        self.assertEqual([entry["user"] for entry in submitted], ["dana", "eli", "dana"])
+        self.app.poll_scheduled_jobs_once()
+        runs = self.app.list_job_runs(job["id"], self.admin)["runs"]
+        dana_runs = sorted((run for run in runs if run["recipient"] == "dana"), key=lambda run: run["attempt"])
+        self.assertEqual([(run["attempt"], run["status"]) for run in dana_runs], [(1, "Failed"), (2, "Succeeded")])
+        self.assertEqual(dana_runs[0]["delivery_status"], "")
+        self.assertEqual(dana_runs[1]["delivery_status"], "sent")
+        self.assertEqual(len(self.app.aws.sent_emails), 2)
+
+    def test_digest_delivery_failure_is_recorded_not_raised(self):
+        self._make_mail_user("dana", "dana@example.com")
+        self._stub_query_path()
+        self.app.set_email_settings({"from_address": "data@example.com"}, self.admin)  # present but disabled
+        job = self._digest_job(["dana"])
+        self.app.poll_scheduled_jobs_once()
+        run = self.app.list_job_runs(job["id"], self.admin)["runs"][0]
+        self.assertEqual(run["status"], "Succeeded")
+        self.assertEqual(run["delivery_status"], "failed")
+        self.assertIn("not enabled", run["delivery_error"])
+
+    def test_render_digest_caps_rows(self):
+        rows = [[index, "x" * 500] for index in range(120)]
+        message = self.app.render_digest_email(
+            {"name": "Big"},
+            {"id": 9, "columns_json": json.dumps([{"name": "n"}, {"name": "note"}]),
+             "data_json": json.dumps(rows), "total_row_count": 120, "updated_at": "2026-09-16T07:00:00+00:00"},
+        )
+        self.assertIn("Showing 50 of 120 rows.", message["text"])
+        self.assertEqual(message["html"].count("<tr>"), 51)
+        self.assertNotIn("x" * 201, message["html"])
+        self.assertNotIn("#history", message["text"])  # no public_url configured
 
     # --- sharing ----------------------------------------------------------------
 

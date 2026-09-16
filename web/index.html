@@ -1426,8 +1426,10 @@ LIMIT 10;</textarea>
                 <thead>
                   <tr>
                     <th>Started</th>
+                    <th>Recipient</th>
                     <th>Attempt</th>
                     <th>Status</th>
+                    <th>Email</th>
                     <th>Elapsed</th>
                     <th>Error</th>
                   </tr>
@@ -1749,6 +1751,39 @@ LIMIT 10;</textarea>
                   <div class="instance-summary-foot">
                     <span></span>
                     <button class="secondary-button admin-action" id="saveNotificationsButton" type="button">Save notifications</button>
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-header compact">
+                  <h3>Email</h3>
+                  <span class="chip neutral" id="emailChip">Off</span>
+                </div>
+                <div class="instance-summary-card">
+                  <p class="instance-picker-hint">
+                    Scheduled-job digests are sent through Amazon SES with the control plane's own
+                    role. Verify the sender address (or its domain) in SES first, and grant the role
+                    <code>ses:SendEmail</code>.
+                  </p>
+                  <label class="app-dialog-check" style="margin-bottom:8px">
+                    <input type="checkbox" id="emailEnabled" class="admin-action" />
+                    <span>Send email</span>
+                  </label>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>From address</span>
+                    <input id="emailFromAddress" class="admin-action" placeholder="data@example.com" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>SES region (blank = this control plane's region)</span>
+                    <input id="emailRegion" class="admin-action" placeholder="us-east-1" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>Public TrinoHub URL (for links in emails)</span>
+                    <input id="emailPublicUrl" class="admin-action" placeholder="https://trinohub.example.com" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="instance-summary-foot">
+                    <button class="ghost-button admin-action" id="sendTestEmailButton" type="button">Send test to me</button>
+                    <button class="secondary-button admin-action" id="saveEmailButton" type="button">Save email</button>
                   </div>
                 </div>
               </div>

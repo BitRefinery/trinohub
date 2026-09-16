@@ -574,6 +574,21 @@ MIGRATIONS = {
         # Result-cache TTL in minutes; NULL falls back to the 10-minute default,
         # 0 disables serving cached results.
         "result_cache_ttl_minutes": "INTEGER",
+        # Outbound email (SES sender address, region, public UI URL for links).
+        # Empty object = email delivery disabled.
+        "email_config_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
+    "scheduled_jobs": {
+        # Digest recipients (user ids). A job with recipients runs once per
+        # recipient, as that recipient, and emails each their own result.
+        "recipients_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "scheduled_job_runs": {
+        "recipient_user_id": "INTEGER",
+        # '' (no email for this run), 'sent', or 'failed'.
+        "delivery_status": "TEXT NOT NULL DEFAULT ''",
+        "delivery_error": "TEXT NOT NULL DEFAULT ''",
+        "delivered_at": "TEXT",
     },
     "users": {
         # Service accounts authenticate only via API tokens, never a password.

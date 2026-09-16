@@ -2504,7 +2504,11 @@ function renderJobs() {
         <td><strong>${escapeHtml(job.name)}</strong>${job.enabled ? "" : ' <span class="chip neutral">paused</span>'}<br /><small>${escapeHtml(job.sql.slice(0, 80))}</small></td>
         <td>${escapeHtml(jobClusterName(job))}</td>
         <td>${escapeHtml(jobScheduleText(job))}</td>
-        <td>${escapeHtml(job.run_as_username)}</td>
+        <td>${
+          (job.recipients || []).length
+            ? `Each recipient<br /><small>Emails ${escapeHtml(job.recipients.join(", "))}</small>`
+            : escapeHtml(job.run_as_username)
+        }</td>
         <td>${escapeHtml(job.last_status || "—")}<br /><small>${escapeHtml(shortTime(job.last_run_at))}</small></td>
         <td>${escapeHtml(job.enabled ? shortTime(job.next_run_at) : "—")}</td>
         <td class="actions-col">
@@ -2561,6 +2565,12 @@ async function createJobDialog() {
       },
       { name: "interval_minutes", label: "Interval minutes (interval schedules)", type: "number", value: "60" },
       { name: "cron_expression", label: "Cron (cron schedules, e.g. 0 3 * * *)", placeholder: "0 3 * * *", autocomplete: "off" },
+      {
+        name: "recipients",
+        label: "Email results to (usernames, comma-separated; optional)",
+        placeholder: "e.g. dana, eli",
+        autocomplete: "off",
+      },
     ],
   });
   if (result === null) return;
@@ -2572,6 +2582,10 @@ async function createJobDialog() {
   };
   if (result.schedule_type === "interval") payload.interval_minutes = Number(result.interval_minutes);
   else payload.cron_expression = result.cron_expression.trim();
+  // A digest runs once per recipient, as that recipient, and emails each
+  // their own result — so it must be a read-only statement.
+  const recipients = (result.recipients || "").split(/[\s,]+/).filter(Boolean);
+  if (recipients.length) payload.recipients = recipients;
   try {
     await apiRequest("/api/jobs", { method: "POST", body: JSON.stringify(payload) });
     await loadJobsFromApi();
@@ -2637,16 +2651,22 @@ async function showJobRuns(job) {
             (run) => `
             <tr>
               <td>${escapeHtml((run.started_at || "").replace("T", " ").slice(0, 19))}</td>
+              <td>${escapeHtml(run.recipient || "—")}</td>
               <td>${run.attempt}</td>
               <td>${escapeHtml(run.status)}</td>
+              <td>${
+                run.delivery_status === "failed"
+                  ? `<span title="${escapeHtml(run.delivery_error || "")}">failed</span>`
+                  : escapeHtml(run.delivery_status || "—")
+              }</td>
               <td>${run.elapsed_ms != null ? escapeHtml(formatElapsedMs(run.elapsed_ms)) : "—"}</td>
               <td><small>${escapeHtml(run.error || "")}</small></td>
             </tr>`
           )
           .join("")
-      : '<tr><td colspan="5">No runs yet.</td></tr>';
+      : '<tr><td colspan="7">No runs yet.</td></tr>';
   } catch (error) {
-    tbody.innerHTML = `<tr><td colspan="5">${escapeHtml(error.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -3348,6 +3368,51 @@ async function saveNotificationSettings() {
     });
     await loadNotificationSettings();
     showToast("Notification settings saved.", { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function loadEmailSettings() {
+  try {
+    const data = await apiRequest("/api/email-settings");
+    const config = data.email || {};
+    document.getElementById("emailEnabled").checked = Boolean(config.enabled);
+    document.getElementById("emailFromAddress").value = config.from_address || "";
+    document.getElementById("emailRegion").value = config.region || "";
+    document.getElementById("emailPublicUrl").value = config.public_url || "";
+    const chip = document.getElementById("emailChip");
+    if (chip) {
+      chip.textContent = config.enabled ? "On" : "Off";
+      chip.className = `chip ${config.enabled ? "success" : "neutral"}`;
+    }
+  } catch (error) {
+    // Non-operators: panel stays inert.
+  }
+}
+
+async function saveEmailSettings() {
+  try {
+    await apiRequest("/api/email-settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: document.getElementById("emailEnabled").checked,
+        from_address: document.getElementById("emailFromAddress").value.trim(),
+        region: document.getElementById("emailRegion").value.trim(),
+        public_url: document.getElementById("emailPublicUrl").value.trim(),
+      }),
+    });
+    await loadEmailSettings();
+    showToast("Email settings saved.", { type: "success" });
+  } catch (error) {
+    showToast(error.message, { type: "error" });
+  }
+}
+
+async function sendTestEmail() {
+  try {
+    const result = await apiRequest("/api/email-settings/test", { method: "POST", body: JSON.stringify({}) });
+    showToast(`Test email sent to ${result.to}.`, { type: "success" });
   } catch (error) {
     showToast(error.message, { type: "error" });
   }
@@ -4414,6 +4479,7 @@ function navigateTo(viewName) {
     loadResultCacheSettings();
     loadApiTokens();
     loadNotificationSettings();
+    loadEmailSettings();
     loadAskSettings();
   }
 }
@@ -7423,6 +7489,10 @@ function wireSettings() {
   if (createToken) createToken.addEventListener("click", createApiTokenDialog);
   const saveNotifications = document.getElementById("saveNotificationsButton");
   if (saveNotifications) saveNotifications.addEventListener("click", saveNotificationSettings);
+  const saveEmail = document.getElementById("saveEmailButton");
+  if (saveEmail) saveEmail.addEventListener("click", saveEmailSettings);
+  const testEmail = document.getElementById("sendTestEmailButton");
+  if (testEmail) testEmail.addEventListener("click", sendTestEmail);
   const saveAskModel = document.getElementById("saveAskModelButton");
   if (saveAskModel) saveAskModel.addEventListener("click", saveAskSettings);
 
@@ -9020,8 +9090,28 @@ function onAuthenticated(user) {
   loadSavedQueriesFromApi();
   loadNotebooksFromApi();
   loadDocsManifest();
-  navigateTo(user.role === "admin" ? "clusters" : "sql");
+  if (!openLinkedQuery()) navigateTo(user.role === "admin" ? "clusters" : "sql");
 }
+
+// Emails link to a query as `#history/<id>` (digests, and later email
+// replies). Opens that query's detail in Query history; returns whether the
+// URL carried such a link.
+function openLinkedQuery() {
+  const match = /^#history\/(\d+)$/.exec(window.location.hash || "");
+  if (!match) return false;
+  const queryId = Number(match[1]);
+  navigateTo("history");
+  loadQueryHistoryFromApi().then(() => {
+    if (queryHistory.some((item) => item.id === queryId)) showQueryDetail(queryId);
+    else showToast(`Query #${queryId} is not in your history.`, { type: "error" });
+  });
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  return true;
+}
+
+window.addEventListener("hashchange", () => {
+  if (currentUser) openLinkedQuery();
+});
 
 function handleSessionExpired() {
   currentUser = null;

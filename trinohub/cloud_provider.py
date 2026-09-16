@@ -56,6 +56,20 @@ class CloudProvider(Protocol):
     # Compute region this provider operates in (its default when a call omits one).
     region: str
 
+    # -- Outbound email ----------------------------------------------------------------
+    def send_email(
+        self,
+        *,
+        region: str,
+        from_address: str,
+        to_addresses: list[str],
+        subject: str,
+        text_body: str,
+        html_body: str = "",
+        reply_to: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Send one email (Amazon SES on AWS). Returns ``{"message_id": ...}``."""
+
     # -- Identity & account inspection -------------------------------------------------
     def metadata(self) -> dict[str, Any]:
         """Self-identifying facts about the control plane's own host/instance."""

@@ -46,6 +46,23 @@ selected events occur: a cluster fails, suspends, or comes up; a scheduled job
 fails after its retry; or a security-audit change happens. Paste a webhook URL,
 pick the events, and save. Leave the URL blank to disable.
 
+## Email
+
+The **Email** panel turns on outbound email for scheduled-job digests (see
+**Scheduled jobs → Email digests**). Mail goes through **Amazon SES** using the
+control plane's own IAM role, so no SMTP password is stored.
+
+1. In SES, verify the sender address or its domain, and request production
+   access if the account is still in the SES sandbox (the sandbox only delivers
+   to verified addresses).
+2. Grant the control-plane role `ses:SendEmail`. The CloudFormation stack and
+   `deploy/iam-control-plane-policy.json` include it; an existing role must be
+   updated by hand.
+3. Set the **From address**, optionally an **SES region** (blank uses the
+   control plane's region), and the **Public TrinoHub URL** used for links in
+   emails. Tick **Send email** and save.
+4. **Send test to me** delivers a message to your own account's email address.
+
 ## API documentation
 
 TrinoHub's control-plane API is a FastAPI app. From Settings you can open:
