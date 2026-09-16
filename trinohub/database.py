@@ -495,6 +495,30 @@ CREATE TABLE IF NOT EXISTS connector_drivers (
 -- body and the full request header set (which can include Authorization/session
 -- state, so rows are short-lived and swept on a TTL). One row per in-flight
 -- wire query, keyed by an opaque shim id embedded in the holding nextUri.
+-- Email front door: one row per inbound email, whether answered or refused.
+-- ``ses_message_id`` dedupes SQS's at-least-once delivery; ``message_id`` is
+-- the email's own Message-ID header, which later replies reference so a
+-- follow-up question carries the thread's earlier questions and answers.
+CREATE TABLE IF NOT EXISTS email_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ses_message_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL DEFAULT '',
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  from_address TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  question TEXT NOT NULL DEFAULT '',
+  answer TEXT NOT NULL DEFAULT '',
+  answer_path TEXT NOT NULL DEFAULT '',
+  templates_json TEXT NOT NULL DEFAULT '[]',
+  query_ids_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_conversations_user_created
+  ON email_conversations (user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS wire_pending (
   shim_id TEXT PRIMARY KEY,
   cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,

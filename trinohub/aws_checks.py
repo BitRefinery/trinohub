@@ -1457,6 +1457,7 @@ EOF
         text_body: str,
         html_body: str = "",
         reply_to: list[str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         import boto3
 
@@ -1470,8 +1471,36 @@ EOF
         }
         if reply_to:
             request["ReplyToAddresses"] = list(reply_to)
+        if headers:
+            request["Content"]["Simple"]["Headers"] = [
+                {"Name": name, "Value": value} for name, value in headers.items()
+            ]
         response = boto3.client("sesv2", region_name=region or self.region).send_email(**request)
         return {"message_id": response.get("MessageId", "")}
+
+    def receive_queue_messages(
+        self, *, region: str, queue_url: str, max_messages: int, wait_seconds: int
+    ) -> list[dict[str, str]]:
+        import boto3
+
+        response = boto3.client("sqs", region_name=region or self.region).receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=max(1, min(int(max_messages), 10)),
+            WaitTimeSeconds=max(0, min(int(wait_seconds), 20)),
+            # Answering can take a minute; keep the message hidden meanwhile.
+            VisibilityTimeout=300,
+        )
+        return [
+            {"receipt_handle": message["ReceiptHandle"], "body": message.get("Body", "")}
+            for message in response.get("Messages", [])
+        ]
+
+    def delete_queue_message(self, *, region: str, queue_url: str, receipt_handle: str) -> None:
+        import boto3
+
+        boto3.client("sqs", region_name=region or self.region).delete_message(
+            QueueUrl=queue_url, ReceiptHandle=receipt_handle
+        )
 
     def coordinator_health(self, *, coordinator_endpoint: str, timeout_seconds: int = 3) -> dict[str, Any]:
         if not coordinator_endpoint:
