@@ -1781,6 +1781,23 @@ LIMIT 10;</textarea>
                     <span>Public TrinoHub URL (for links in emails)</span>
                     <input id="emailPublicUrl" class="admin-action" placeholder="https://trinohub.example.com" autocomplete="off" spellcheck="false" />
                   </label>
+                  <p class="instance-picker-hint" style="margin-top:12px">
+                    <strong>Emailed questions.</strong> People in a role with <code>ASK_BY_EMAIL</code> can
+                    email the inbound address and get an answer as themselves. Mail reaches TrinoHub
+                    through an SES receipt rule that publishes to SNS, subscribed by the SQS queue below.
+                  </p>
+                  <label class="app-dialog-check" style="margin-bottom:8px">
+                    <input type="checkbox" id="emailInboundEnabled" class="admin-action" />
+                    <span>Answer emailed questions</span>
+                  </label>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>Inbound address</span>
+                    <input id="emailInboundAddress" class="admin-action" placeholder="ask@example.com" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="span-2" style="display:block;margin-bottom:8px">
+                    <span>Inbound SQS queue URL</span>
+                    <input id="emailInboundQueueUrl" class="admin-action" placeholder="https://sqs.us-east-1.amazonaws.com/123456789012/trinohub-inbound" autocomplete="off" spellcheck="false" />
+                  </label>
                   <div class="instance-summary-foot">
                     <button class="ghost-button admin-action" id="sendTestEmailButton" type="button">Send test to me</button>
                     <button class="secondary-button admin-action" id="saveEmailButton" type="button">Save email</button>
@@ -1836,6 +1853,26 @@ LIMIT 10;</textarea>
                   </thead>
                   <tbody id="apiTokenRows">
                     <tr><td colspan="6">No tokens.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="panel span-2 table-panel" id="emailQuestionsPanel">
+                <div class="panel-header compact">
+                  <h3>Emailed questions</h3>
+                  <span class="chip neutral" id="emailQuestionsChip">-</span>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>From</th>
+                      <th>Question</th>
+                      <th>Answer</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="emailQuestionRows">
+                    <tr><td colspan="5">No entries loaded.</td></tr>
                   </tbody>
                 </table>
               </div>

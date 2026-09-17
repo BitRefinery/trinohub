@@ -67,8 +67,18 @@ class CloudProvider(Protocol):
         text_body: str,
         html_body: str = "",
         reply_to: list[str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send one email (Amazon SES on AWS). Returns ``{"message_id": ...}``."""
+
+    def receive_queue_messages(
+        self, *, region: str, queue_url: str, max_messages: int, wait_seconds: int
+    ) -> list[dict[str, str]]:
+        """Long-poll a message queue (SQS on AWS) for inbound email notifications.
+        Returns ``[{"receipt_handle": ..., "body": ...}]``."""
+
+    def delete_queue_message(self, *, region: str, queue_url: str, receipt_handle: str) -> None:
+        """Remove a handled message from the queue."""
 
     # -- Identity & account inspection -------------------------------------------------
     def metadata(self) -> dict[str, Any]:

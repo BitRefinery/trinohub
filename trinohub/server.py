@@ -32,6 +32,7 @@ from .aws_checks import (
     instance_store_disks,
 )
 from .cloud_provider import PROVIDER_AWS, CloudProvider
+from . import email_agent
 from .tls_gateway import SHIM_UPSTREAM, build_caddyfile, push_config
 from .connectors import (
     CREDENTIALED_CATALOG_TYPES,
@@ -265,6 +266,10 @@ PRIVILEGE_CANCEL_ANY_QUERY = "CANCEL_ANY_QUERY"
 # MANAGE_CATALOGS because connecting a data source and deciding how it is
 # described to an AI client are different jobs.
 PRIVILEGE_MANAGE_DATA_PRODUCTS = "MANAGE_DATA_PRODUCTS"
+# Asking questions by email. Granted per role, never implied by a sign-in:
+# the From address stands in for a password, so the operator opts each group
+# of people in explicitly.
+PRIVILEGE_ASK_BY_EMAIL = "ASK_BY_EMAIL"
 ALL_PRIVILEGES = (
     PRIVILEGE_MANAGE_USERS,
     PRIVILEGE_MANAGE_SECURITY,
@@ -274,6 +279,7 @@ ALL_PRIVILEGES = (
     PRIVILEGE_MANAGE_DATA_PRODUCTS,
     PRIVILEGE_VIEW_ALL_QUERY_HISTORY,
     PRIVILEGE_CANCEL_ANY_QUERY,
+    PRIVILEGE_ASK_BY_EMAIL,
 )
 ROLE_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{1,62}")
 GRANT_WILDCARD = "*"
@@ -334,6 +340,14 @@ AWS_REGION_PATTERN = re.compile(r"[a-z]{2}(-[a-z]+)+-\d")
 MAX_JOB_RECIPIENTS = 50
 DIGEST_MAX_ROWS = 50
 DIGEST_MAX_CELL_CHARS = 200
+# Inbound questions (email front door). Messages are pulled from an SQS queue
+# fed by an SES receipt rule; each answered email costs LLM calls and queries,
+# so senders are rate limited.
+SQS_QUEUE_URL_PATTERN = re.compile(r"https://sqs\.[a-z0-9-]+\.amazonaws\.com(\.cn)?/\d{12}/[A-Za-z0-9_-]{1,80}")
+EMAIL_QUESTIONS_PER_HOUR = 20
+INBOUND_BATCH_SIZE = 5
+INBOUND_WAIT_SECONDS = 20
+MAX_EMAIL_CONVERSATIONS_LISTED = 100
 COST_WINDOW_DAYS = 30
 UPTIME_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 UPTIME_WINDOW_PATTERN = re.compile(r"([0-2]\d):([0-5]\d)-([0-2]\d):([0-5]\d)")
@@ -2459,6 +2473,280 @@ class TrinoHubApp:
         )
         return {"subject": subject, "text": "\n".join(text_lines), "html": html_body}
 
+    # --- Email front door --------------------------------------------------------
+
+    def poll_inbound_email_once(self) -> int:
+        """Pull a batch of inbound emails and answer each. Every message is
+        deleted after it is recorded — answered, refused, or failed — so a
+        poison message can never wedge the queue. Returns how many were handled."""
+        config = self.email_settings()
+        if not config["inbound_enabled"] or not config["inbound_queue_url"]:
+            return 0
+        region = self.email_region()
+        messages = self.aws.receive_queue_messages(
+            region=region,
+            queue_url=config["inbound_queue_url"],
+            max_messages=INBOUND_BATCH_SIZE,
+            wait_seconds=INBOUND_WAIT_SECONDS,
+        )
+        for message in messages:
+            try:
+                self.handle_inbound_email(message["body"])
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"Inbound email handling failed: {type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    self.aws.delete_queue_message(
+                        region=region, queue_url=config["inbound_queue_url"], receipt_handle=message["receipt_handle"]
+                    )
+                except Exception as exc:  # a redelivered copy may already be gone
+                    print(f"Inbound email delete failed: {type(exc).__name__}: {exc}")
+        return len(messages)
+
+    def _record_email(self, inbound: email_agent.InboundEmail, *, status: str, detail: str = "", **fields: Any) -> bool:
+        """Insert the conversation row; False when this SES message was already
+        recorded (SQS delivers at least once)."""
+        row = {
+            "ses_message_id": inbound.ses_message_id,
+            "message_id": inbound.message_id,
+            "from_address": inbound.from_address,
+            "subject": inbound.subject[:500],
+            "question": inbound.question,
+            "status": status,
+            "detail": detail,
+            "created_at": utc_now(),
+            **fields,
+        }
+        columns = ", ".join(row)
+        placeholders = ", ".join("?" for _ in row)
+        with self.conn() as conn:
+            cursor = conn.execute(
+                f"INSERT OR IGNORE INTO email_conversations ({columns}) VALUES ({placeholders})", tuple(row.values())
+            )
+            return cursor.rowcount == 1
+
+    def _reply_to_email(self, inbound: email_agent.InboundEmail, text: str, html_body: str = "") -> None:
+        references = " ".join(dict.fromkeys([*inbound.references, inbound.message_id] if inbound.message_id else inbound.references))
+        headers = {"Auto-Submitted": "auto-replied"}
+        if inbound.message_id:
+            headers["In-Reply-To"] = inbound.message_id
+        if references:
+            headers["References"] = references
+        # Only ever the verified sender — never Cc'd people or addresses in the body.
+        self.send_email(
+            [inbound.from_address], email_agent.reply_subject(inbound.subject), text, html_body, headers=headers
+        )
+
+    def handle_inbound_email(self, body: str) -> dict[str, Any]:
+        """Answer one inbound email as its verified sender. Returns the recorded
+        outcome (for tests and logs); never raises for ordinary refusals."""
+        try:
+            inbound = email_agent.parse_ses_notification(body)
+        except email_agent.InboundParseError as exc:
+            print(f"Inbound email skipped: {exc}")
+            return {"status": "unparseable", "detail": str(exc)}
+        if not inbound.ses_message_id:
+            return {"status": "unparseable", "detail": "missing SES message id"}
+        with self.conn() as conn:
+            if conn.execute(
+                "SELECT 1 FROM email_conversations WHERE ses_message_id = ?", (inbound.ses_message_id,)
+            ).fetchone():
+                return {"status": "duplicate"}
+        config = self.email_settings()
+
+        # Silent refusals: replying to these would spray mail at spoofed or
+        # automated senders (backscatter, loops).
+        own_addresses = {config["from_address"].lower(), config["inbound_address"].lower()}
+        if inbound.automated or inbound.from_address in own_addresses or not inbound.from_address:
+            self._record_email(inbound, status="ignored", detail="automated or self-sent message")
+            return {"status": "ignored"}
+        authenticated, reason = email_agent.sender_authenticated(inbound.verdicts)
+        if not authenticated:
+            self._record_email(inbound, status="rejected", detail=f"sender authentication failed: {reason}")
+            self.audit(None, "email.rejected", inbound.from_address, {"reason": reason, "verdicts": inbound.verdicts})
+            return {"status": "rejected", "detail": reason}
+
+        with self.conn() as conn:
+            matches = conn.execute(
+                "SELECT * FROM users WHERE lower(email) = ? AND is_active = 1 AND is_service = 0",
+                (inbound.from_address,),
+            ).fetchall()
+        user = row_to_dict(matches[0]) if len(matches) == 1 else None
+        if user is None or not self.has_privilege(user, PRIVILEGE_ASK_BY_EMAIL):
+            detail = "no single active user with this address" if user is None else "user lacks ASK_BY_EMAIL"
+            if not self._record_email(inbound, status="refused", detail=detail, user_id=user["id"] if user else None):
+                return {"status": "duplicate"}
+            self.audit(user, "email.refused", inbound.from_address, {"reason": detail})
+            self._safe_reply(
+                inbound,
+                "This address isn't set up to answer questions from you. "
+                "Ask your TrinoHub administrator to enable email questions for your account.",
+            )
+            return {"status": "refused", "detail": detail}
+
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        with self.conn() as conn:
+            recent = conn.execute(
+                "SELECT COUNT(*) FROM email_conversations WHERE user_id = ? AND status IN ('answered', 'answering', 'failed') AND created_at >= ?",
+                (user["id"], since),
+            ).fetchone()[0]
+        if recent >= EMAIL_QUESTIONS_PER_HOUR:
+            if self._record_email(inbound, status="limited", detail="hourly question limit", user_id=user["id"]):
+                self._safe_reply(
+                    inbound,
+                    f"You've reached the limit of {EMAIL_QUESTIONS_PER_HOUR} emailed questions per hour. "
+                    "Try again a little later.",
+                )
+            return {"status": "limited"}
+        if not inbound.question:
+            if self._record_email(inbound, status="refused", detail="empty question", user_id=user["id"]):
+                self._safe_reply(inbound, "I couldn't find a question in your email. Reply with what you'd like to know.")
+            return {"status": "refused", "detail": "empty question"}
+
+        # Claim the message before the slow part so a redelivery can't answer twice.
+        if not self._record_email(inbound, status="answering", user_id=user["id"]):
+            return {"status": "duplicate"}
+        try:
+            outcome = email_agent.run_agent(
+                inbound.question,
+                system_prompt=email_agent.build_agent_system_prompt(user["username"], utc_now()[:10]),
+                history=self._email_thread_history(inbound, user["id"]),
+                chat=self.call_agent_llm,
+                execute_tool=lambda name, arguments: self.email_agent_tool(name, arguments, user),
+            )
+        except ApiError as exc:
+            self._finish_email(inbound, status="failed", detail=exc.message)
+            self._safe_reply(inbound, "Sorry — I couldn't answer that right now. Please try again later.")
+            return {"status": "failed", "detail": exc.message}
+
+        reply = email_agent.render_reply(outcome, config["public_url"])
+        status, detail = "answered", ""
+        try:
+            self._reply_to_email(inbound, reply["text"], reply["html"])
+        except ApiError as exc:
+            status, detail = "failed", f"reply not sent: {exc.message}"
+        self._finish_email(
+            inbound,
+            status=status,
+            detail=detail,
+            answer=outcome.answer,
+            answer_path=outcome.path,
+            templates_json=dumps(outcome.templates),
+            query_ids_json=dumps(outcome.query_ids),
+        )
+        self.audit(
+            user,
+            "email.ask",
+            inbound.subject[:120],
+            {"path": outcome.path, "templates": outcome.templates, "query_ids": outcome.query_ids,
+             "tools": outcome.tool_calls, "status": status},
+        )
+        return {"status": status, "path": outcome.path, "query_ids": outcome.query_ids, "answer": outcome.answer}
+
+    def _finish_email(self, inbound: email_agent.InboundEmail, **fields: Any) -> None:
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self.conn() as conn:
+            conn.execute(
+                f"UPDATE email_conversations SET {assignments} WHERE ses_message_id = ?",
+                (*fields.values(), inbound.ses_message_id),
+            )
+
+    def _safe_reply(self, inbound: email_agent.InboundEmail, text: str) -> None:
+        try:
+            self._reply_to_email(inbound, text)
+        except ApiError as exc:
+            print(f"Inbound email reply failed: {exc.message}")
+
+    def _email_thread_history(self, inbound: email_agent.InboundEmail, user_id: int) -> list[dict[str, str]]:
+        """Earlier answered turns of this thread for the same user, oldest first.
+        A reply's References/In-Reply-To name the Message-IDs it follows."""
+        referenced = [value for value in [*inbound.references, inbound.in_reply_to] if value]
+        if not referenced:
+            return []
+        placeholders = ", ".join("?" for _ in referenced)
+        with self.conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT question, answer FROM email_conversations
+                WHERE user_id = ? AND status = 'answered' AND message_id IN ({placeholders})
+                ORDER BY id DESC LIMIT ?
+                """,
+                (user_id, *referenced, email_agent.EMAIL_THREAD_HISTORY_MAX),
+            ).fetchall()
+        history: list[dict[str, str]] = []
+        for row in reversed(rows):
+            history.append({"role": "user", "content": row["question"]})
+            history.append({"role": "assistant", "content": row["answer"]})
+        return history
+
+    def email_agent_tool(self, name: str, arguments: dict[str, Any], user: dict[str, Any]) -> Any:
+        """Run one email-agent tool as the sender. The same server methods the UI
+        and MCP use, so every grant and row filter applies unchanged."""
+        if name == "search_data_products":
+            products = self.list_data_products(user, search=str(arguments.get("search") or ""))["products"]
+            return {
+                "products": [
+                    {key: product.get(key) for key in ("name", "summary", "cluster_id", "catalog", "schema", "tags")}
+                    for product in products[:10]
+                ]
+            }
+        if name == "get_data_product":
+            return self.get_data_product_by_name(str(arguments.get("name") or ""), user)
+        if name == "list_query_templates":
+            return self.list_query_templates(user)
+        if name == "run_query_template":
+            return self.run_query_template(
+                {"template": arguments.get("template"), "parameters": arguments.get("parameters") or {}}, user
+            )
+        if name == "list_clusters":
+            return {
+                "clusters": [
+                    {"id": cluster["id"], "name": cluster["name"], "status": cluster["status"]}
+                    for cluster in self.list_clusters(user)["clusters"]
+                ]
+            }
+        if name == "browse_metadata":
+            return self.cluster_metadata(
+                int(arguments.get("cluster_id")),
+                catalog=str(arguments.get("catalog") or ""),
+                schema_name=str(arguments.get("schema") or ""),
+                table=str(arguments.get("table") or ""),
+                user=user,
+            )
+        if name == "run_query":
+            return self.run_readonly_sql(arguments, user, allow_metadata=False)
+        raise ApiError(400, f"Unknown tool: {name}")
+
+    def list_email_conversations(self, *, limit: int = MAX_EMAIL_CONVERSATIONS_LISTED) -> dict[str, Any]:
+        with self.conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT email_conversations.*, users.username FROM email_conversations
+                LEFT JOIN users ON users.id = email_conversations.user_id
+                ORDER BY email_conversations.id DESC LIMIT ?
+                """,
+                (max(1, min(int(limit), MAX_EMAIL_CONVERSATIONS_LISTED)),),
+            ).fetchall()
+        return {
+            "conversations": [
+                {
+                    "id": row["id"],
+                    "from_address": row["from_address"],
+                    "username": row["username"] or "",
+                    "subject": row["subject"],
+                    "question": row["question"],
+                    "answer": row["answer"],
+                    "answer_path": row["answer_path"],
+                    "templates": loads(row["templates_json"], []),
+                    "query_ids": loads(row["query_ids_json"], []),
+                    "status": row["status"],
+                    "detail": row["detail"],
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
+        }
+
     # --- Metadata cache, autocomplete & global search (Phase 3) ---------------
 
     def _cache_tables(
@@ -2999,6 +3287,9 @@ class TrinoHubApp:
             "from_address": str(config.get("from_address") or ""),
             "region": str(config.get("region") or ""),
             "public_url": str(config.get("public_url") or ""),
+            "inbound_enabled": bool(config.get("inbound_enabled")),
+            "inbound_address": str(config.get("inbound_address") or ""),
+            "inbound_queue_url": str(config.get("inbound_queue_url") or ""),
         }
 
     def set_email_settings(self, payload: dict[str, Any], actor: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3018,28 +3309,63 @@ class TrinoHubApp:
             raise ApiError(400, "region must be an AWS region id such as us-east-1.")
         if public_url and not public_url.startswith(("https://", "http://")):
             raise ApiError(400, "public_url must be an http(s) URL.")
-        config = {"enabled": enabled, "from_address": from_address, "region": region, "public_url": public_url}
+        inbound_enabled = bool(payload.get("inbound_enabled", current["inbound_enabled"]))
+        inbound_address = str(payload.get("inbound_address", current["inbound_address"]) or "").strip().lower()
+        inbound_queue_url = str(payload.get("inbound_queue_url", current["inbound_queue_url"]) or "").strip()
+        if inbound_address and not EMAIL_ADDRESS_PATTERN.fullmatch(inbound_address):
+            raise ApiError(400, "inbound_address must be a plain email address, for example ask@example.com.")
+        if inbound_queue_url and not SQS_QUEUE_URL_PATTERN.fullmatch(inbound_queue_url):
+            raise ApiError(400, "inbound_queue_url must be an SQS queue URL (https://sqs.<region>.amazonaws.com/<account>/<name>).")
+        if inbound_enabled and not (enabled and inbound_address and inbound_queue_url):
+            raise ApiError(
+                400, "Answering email needs outbound email enabled, an inbound address, and an inbound queue URL."
+            )
+        config = {
+            "enabled": enabled,
+            "from_address": from_address,
+            "region": region,
+            "public_url": public_url,
+            "inbound_enabled": inbound_enabled,
+            "inbound_address": inbound_address,
+            "inbound_queue_url": inbound_queue_url,
+        }
         with self.conn() as conn:
             conn.execute("UPDATE setup_settings SET email_config_json = ? WHERE id = 1", (dumps(config),))
-        self.audit(actor, "settings.email", from_address, {"enabled": enabled, "region": region})
+        self.audit(
+            actor,
+            "settings.email",
+            from_address,
+            {"enabled": enabled, "region": region, "inbound_enabled": inbound_enabled, "inbound_address": inbound_address},
+        )
         return {"email": self.email_settings()}
 
-    def send_email(self, to_addresses: list[str], subject: str, text_body: str, html_body: str = "") -> dict[str, Any]:
+    def email_region(self) -> str:
+        setup = self.setup_row() or {}
+        return self.email_settings()["region"] or str(setup.get("region") or "") or self.aws.region
+
+    def send_email(
+        self,
+        to_addresses: list[str],
+        subject: str,
+        text_body: str,
+        html_body: str = "",
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Send through the provider, raising ApiError with an operator-safe
         message on misconfiguration or provider failure."""
         config = self.email_settings()
         if not config["enabled"] or not config["from_address"]:
             raise ApiError(409, "Email delivery is not enabled. Configure it in Settings.")
-        setup = self.setup_row() or {}
-        region = config["region"] or str(setup.get("region") or "") or self.aws.region
         try:
             return self.aws.send_email(
-                region=region,
+                region=self.email_region(),
                 from_address=config["from_address"],
                 to_addresses=to_addresses,
                 subject=subject,
                 text_body=text_body,
                 html_body=html_body,
+                headers=headers or None,
             )
         except Exception as exc:
             print(f"Email send failed: {type(exc).__name__}: {exc}")
@@ -3564,12 +3890,15 @@ class TrinoHubApp:
 
     # --- MCP server (Phase 7 differentiator) --------------------------------------
 
-    def run_readonly_sql(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    def run_readonly_sql(
+        self, payload: dict[str, Any], user: dict[str, Any], *, allow_metadata: bool = True
+    ) -> dict[str, Any]:
         """Run one read-only statement through the normal query path and poll it
         toward a terminal state. The same validate_read_only_sql boundary as Ask
-        Trino, widened to SHOW/DESCRIBE/EXPLAIN: callers (MCP clients) can read
-        metadata and plans, but can never mutate data."""
-        sql_text = validate_read_only_sql(str(payload.get("sql") or ""), allow_metadata=True)
+        Trino, widened by default to SHOW/DESCRIBE/EXPLAIN: callers (MCP clients)
+        can read metadata and plans, but can never mutate data. The email agent
+        passes allow_metadata=False — its SQL is model output, like Ask Trino's."""
+        sql_text = validate_read_only_sql(str(payload.get("sql") or ""), allow_metadata=allow_metadata)
         result = self.create_query(
             {
                 "cluster_id": payload.get("cluster_id"),
@@ -6764,6 +7093,20 @@ class TrinoHubApp:
         thread = threading.Thread(target=poll_loop, name="trinohub-health-poller", daemon=True)
         thread.start()
 
+        # Inbound email runs on its own thread: answering one email can take a
+        # minute of LLM and query time, which must not stall autoscaling.
+        def inbound_loop() -> None:
+            while True:
+                handled = 0
+                try:
+                    handled = self.poll_inbound_email_once()
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(f"Inbound email poll failed: {type(exc).__name__}: {exc}")
+                if not handled:
+                    time.sleep(interval_seconds)
+
+        threading.Thread(target=inbound_loop, name="trinohub-inbound-email", daemon=True).start()
+
     def suspend_cluster(self, cluster_id: int) -> dict[str, Any]:
         now = utc_now()
         with self.conn() as conn:
@@ -9235,20 +9578,28 @@ class TrinoHubApp:
                 503,
                 "Ask Trino is not configured. Set OPENROUTER_API_KEY (or ASK_TRINO_API_KEY) to enable the assistant.",
             )
-        api_base = os.environ.get("ASK_TRINO_API_BASE", ASK_TRINO_DEFAULT_API_BASE)
-        # Operator-chosen model (Settings) wins over ASK_TRINO_MODEL / the default.
-        model = self.ask_trino_settings()["effective_model"]
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": question})
+        message = self._llm_chat(
+            {"messages": messages, "response_format": {"type": "json_object"}}, api_key=api_key
+        )
+        return str(message.get("content") or "")
+
+    def call_agent_llm(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """One tool-calling turn (OpenAI-compatible) for the email agent: returns
+        the assistant message with ``content`` and any ``tool_calls``."""
+        api_key = os.environ.get("ASK_TRINO_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ApiError(503, "The assistant is not configured. Set OPENROUTER_API_KEY (or ASK_TRINO_API_KEY).")
+        return self._llm_chat({"messages": messages, "tools": tools}, api_key=api_key)
+
+    def _llm_chat(self, fields: dict[str, Any], *, api_key: str) -> dict[str, Any]:
+        api_base = os.environ.get("ASK_TRINO_API_BASE", ASK_TRINO_DEFAULT_API_BASE)
+        # Operator-chosen model (Settings) wins over ASK_TRINO_MODEL / the default.
+        model = self.ask_trino_settings()["effective_model"]
         body = json.dumps(
-            {
-                "model": model,
-                "messages": messages,
-                "max_tokens": ASK_TRINO_MAX_TOKENS,
-                "temperature": 0.1,
-                "response_format": {"type": "json_object"},
-            }
+            {"model": model, "max_tokens": ASK_TRINO_MAX_TOKENS, "temperature": 0.1, **fields}
         ).encode("utf-8")
         request = urllib.request.Request(
             api_base,
@@ -9288,6 +9639,9 @@ class TrinoHubApp:
             raise ApiError(502, f"The assistant endpoint is unreachable: {exc.reason}") from exc
         try:
             data = json.loads(raw)
-            return str(data["choices"][0]["message"]["content"])
+            message = data["choices"][0]["message"]
+            if not isinstance(message, dict):
+                raise TypeError("message is not an object")
+            return message
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             raise ApiError(502, "The assistant returned an unexpected response.") from exc

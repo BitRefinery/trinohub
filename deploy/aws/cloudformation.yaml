@@ -185,6 +185,10 @@ Resources:
                 Effect: Allow
                 Action: ses:SendEmail
                 Resource: "*"
+              - Sid: ReadInboundEmailQueue
+                Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage]
+                Resource: !Sub "arn:aws:sqs:*:${AWS::AccountId}:trinohub-inbound*"
 
   ControlPlaneInstanceProfile:
     Type: AWS::IAM::InstanceProfile

@@ -180,6 +180,9 @@ class EmailSettingsRequest(PayloadModel):
     from_address: str | None = None
     region: str | None = None
     public_url: str | None = None
+    inbound_enabled: bool | None = None
+    inbound_address: str | None = None
+    inbound_queue_url: str | None = None
 
 
 class AskTrinoSettingsRequest(PayloadModel):
@@ -1375,6 +1378,15 @@ def create_app(
         actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
     ) -> dict[str, Any]:
         return control.send_test_email(actor)
+
+    @api.get("/api/email-conversations", tags=["security"])
+    def email_conversations(
+        limit: int = 100,
+        _: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SECURITY)),
+    ) -> dict[str, Any]:
+        # Questions and answers can carry business data, so this is gated like
+        # the security audit log rather than like ordinary settings.
+        return control.list_email_conversations(limit=limit)
 
     @api.get("/api/ask-settings", tags=["settings"])
     def get_ask_settings(_: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS))) -> dict[str, Any]:

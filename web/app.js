@@ -2002,6 +2002,52 @@ async function loadAuditLog() {
   }
 }
 
+// Every inbound email is recorded — answered, refused, or rejected — so an
+// operator can see what people ask and which answers were freeform drafts.
+async function loadEmailQuestions() {
+  const panel = document.getElementById("emailQuestionsPanel");
+  const tbody = document.getElementById("emailQuestionRows");
+  const chip = document.getElementById("emailQuestionsChip");
+  if (!tbody) return;
+  try {
+    const data = await apiRequest("/api/email-conversations?limit=50");
+    const rows = data.conversations || [];
+    if (panel) panel.hidden = false;
+    if (chip) {
+      chip.textContent = `${rows.length} recent`;
+      chip.className = "chip info";
+    }
+    const pathLabel = { template: "Vetted template", freeform: "Freeform draft", none: "No query" };
+    tbody.innerHTML = rows.length
+      ? rows
+          .map((row) => {
+            const queries = (row.query_ids || [])
+              .map((id) => `<a href="#history/${Number(id)}">#${Number(id)}</a>`)
+              .join(" ");
+            const answer = row.answer
+              ? `${escapeHtml(row.answer.slice(0, 160))}${row.answer.length > 160 ? "…" : ""}<br /><small>${escapeHtml(
+                  pathLabel[row.answer_path] || ""
+                )} ${queries}</small>`
+              : "—";
+            return `
+            <tr>
+              <td>${escapeHtml((row.created_at || "").replace("T", " ").replace("+00:00", ""))}</td>
+              <td>${escapeHtml(row.username || row.from_address)}${
+                row.username ? `<br /><small>${escapeHtml(row.from_address)}</small>` : ""
+              }</td>
+              <td>${escapeHtml((row.question || row.subject || "").slice(0, 160))}</td>
+              <td>${answer}</td>
+              <td>${escapeHtml(row.status)}${row.detail ? `<br /><small>${escapeHtml(row.detail)}</small>` : ""}</td>
+            </tr>`;
+          })
+          .join("")
+      : '<tr><td colspan="5">No emailed questions yet.</td></tr>';
+  } catch (error) {
+    // Users without MANAGE_SECURITY don't see emailed questions.
+    if (panel) panel.hidden = true;
+  }
+}
+
 // --- Scheduled SQL jobs (Phase 3) --------------------------------------------
 // --- Data products and query templates -----------------------------------
 // Both are curation surfaces for what an MCP client sees: products describe
@@ -3381,9 +3427,12 @@ async function loadEmailSettings() {
     document.getElementById("emailFromAddress").value = config.from_address || "";
     document.getElementById("emailRegion").value = config.region || "";
     document.getElementById("emailPublicUrl").value = config.public_url || "";
+    document.getElementById("emailInboundEnabled").checked = Boolean(config.inbound_enabled);
+    document.getElementById("emailInboundAddress").value = config.inbound_address || "";
+    document.getElementById("emailInboundQueueUrl").value = config.inbound_queue_url || "";
     const chip = document.getElementById("emailChip");
     if (chip) {
-      chip.textContent = config.enabled ? "On" : "Off";
+      chip.textContent = config.enabled ? (config.inbound_enabled ? "Sending + answering" : "Sending") : "Off";
       chip.className = `chip ${config.enabled ? "success" : "neutral"}`;
     }
   } catch (error) {
@@ -3400,6 +3449,9 @@ async function saveEmailSettings() {
         from_address: document.getElementById("emailFromAddress").value.trim(),
         region: document.getElementById("emailRegion").value.trim(),
         public_url: document.getElementById("emailPublicUrl").value.trim(),
+        inbound_enabled: document.getElementById("emailInboundEnabled").checked,
+        inbound_address: document.getElementById("emailInboundAddress").value.trim(),
+        inbound_queue_url: document.getElementById("emailInboundQueueUrl").value.trim(),
       }),
     });
     await loadEmailSettings();
@@ -4480,6 +4532,7 @@ function navigateTo(viewName) {
     loadApiTokens();
     loadNotificationSettings();
     loadEmailSettings();
+    loadEmailQuestions();
     loadAskSettings();
   }
 }

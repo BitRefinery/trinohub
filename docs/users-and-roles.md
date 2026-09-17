@@ -37,6 +37,7 @@ privileges are:
 | `MANAGE_SETTINGS` | Change instance types, base domain, SSO, sessions, notifications |
 | `VIEW_ALL_QUERY_HISTORY` | See every user's query history, not just your own |
 | `CANCEL_ANY_QUERY` | Cancel queries owned by other users |
+| `ASK_BY_EMAIL` | Ask questions by email and get answers as yourself (see **Ask by email**) |
 
 A user with any management privilege sees the corresponding admin screens; a
 user with none sees only the query surfaces.

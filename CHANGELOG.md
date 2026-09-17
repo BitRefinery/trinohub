@@ -12,6 +12,19 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Added
 
+- **Ask by email.** People in a role with the new `ASK_BY_EMAIL` privilege can
+  email a question to an inbound address and get the answer as a threaded reply.
+  Mail arrives through an SES receipt rule → SNS → SQS queue that the control
+  plane pulls (no public webhook). Senders must pass DMARC and match exactly one
+  active account; spoofed and automated mail is dropped without a reply. The
+  answer is produced by a tool-calling agent acting as the sender, so grants and
+  row filters apply; it must check data products and query templates before its
+  freeform SQL is unlocked, and freeform SQL is SELECT-only. Replies state the
+  date range, whether a vetted template or a freeform draft produced the number,
+  and link each query in Query history. Follow-up replies carry the thread's
+  earlier questions. Senders are limited to 20 questions an hour, every inbound
+  email is recorded under **Settings → Emailed questions**, and the control-plane
+  IAM policy gains SQS receive/delete on `trinohub-inbound*` queues.
 - **Email digests for scheduled jobs.** A job can list recipients; each time it
   fires it runs once per recipient, as that recipient, and emails each person
   their own result through Amazon SES. Row filters and grants therefore apply
