@@ -31,6 +31,10 @@ Anything landing on `main` between releases goes under **Unreleased**.
   as context, and counted: the jobs table shows each digest's follow-up replies
   over the last 30 days, and Emailed questions marks which digest a question
   replied to.
+- **`deploy/aws/email-front-door.yaml`.** One stack for the AWS side of email:
+  SES domain identity with DKIM, the inbound receipt rule, SNS topic and SQS
+  queue, and the control-plane role's send/receive permissions. Outputs the DNS
+  records to add, the queue URL, and the command that activates the rule set.
 - **Email digests for scheduled jobs.** A job can list recipients; each time it
   fires it runs once per recipient, as that recipient, and emails each person
   their own result through Amazon SES. Row filters and grants therefore apply
