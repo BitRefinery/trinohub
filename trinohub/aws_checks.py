@@ -1447,6 +1447,32 @@ EOF
             "key_name": key_name or "",
         }
 
+    def send_email(
+        self,
+        *,
+        region: str,
+        from_address: str,
+        to_addresses: list[str],
+        subject: str,
+        text_body: str,
+        html_body: str = "",
+        reply_to: list[str] | None = None,
+    ) -> dict[str, Any]:
+        import boto3
+
+        body: dict[str, Any] = {"Text": {"Data": text_body, "Charset": "UTF-8"}}
+        if html_body:
+            body["Html"] = {"Data": html_body, "Charset": "UTF-8"}
+        request: dict[str, Any] = {
+            "FromEmailAddress": from_address,
+            "Destination": {"ToAddresses": list(to_addresses)},
+            "Content": {"Simple": {"Subject": {"Data": subject, "Charset": "UTF-8"}, "Body": body}},
+        }
+        if reply_to:
+            request["ReplyToAddresses"] = list(reply_to)
+        response = boto3.client("sesv2", region_name=region or self.region).send_email(**request)
+        return {"message_id": response.get("MessageId", "")}
+
     def coordinator_health(self, *, coordinator_endpoint: str, timeout_seconds: int = 3) -> dict[str, Any]:
         if not coordinator_endpoint:
             return {"ok": False, "state": "unknown", "detail": "Coordinator endpoint is not known yet."}

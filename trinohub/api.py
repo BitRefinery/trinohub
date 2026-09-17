@@ -150,6 +150,7 @@ class JobCreateRequest(PayloadModel):
     interval_minutes: int | None = None
     cron_expression: str = ""
     run_as: str = ""
+    recipients: list[str] | None = None
 
 
 class JobUpdateRequest(PayloadModel):
@@ -161,6 +162,7 @@ class JobUpdateRequest(PayloadModel):
     interval_minutes: int | None = None
     cron_expression: str | None = None
     enabled: bool | None = None
+    recipients: list[str] | None = None
 
 
 class ShareRequest(PayloadModel):
@@ -171,6 +173,13 @@ class ShareRequest(PayloadModel):
 class NotificationSettingsRequest(PayloadModel):
     webhook_url: str | None = None
     events: list[str] | None = None
+
+
+class EmailSettingsRequest(PayloadModel):
+    enabled: bool | None = None
+    from_address: str | None = None
+    region: str | None = None
+    public_url: str | None = None
 
 
 class AskTrinoSettingsRequest(PayloadModel):
@@ -1349,6 +1358,23 @@ def create_app(
         actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
     ) -> dict[str, Any]:
         return control.set_notification_settings(payload.model_dump(by_alias=True, exclude_unset=True), actor)
+
+    @api.get("/api/email-settings", tags=["settings"])
+    def get_email_settings(_: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS))) -> dict[str, Any]:
+        return {"email": control.email_settings()}
+
+    @api.put("/api/email-settings", tags=["settings"])
+    def put_email_settings(
+        payload: EmailSettingsRequest,
+        actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.set_email_settings(payload.model_dump(by_alias=True, exclude_unset=True), actor)
+
+    @api.post("/api/email-settings/test", tags=["settings"])
+    def test_email_settings(
+        actor: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS)),
+    ) -> dict[str, Any]:
+        return control.send_test_email(actor)
 
     @api.get("/api/ask-settings", tags=["settings"])
     def get_ask_settings(_: dict[str, Any] = Depends(require_privilege(PRIVILEGE_MANAGE_SETTINGS))) -> dict[str, Any]:

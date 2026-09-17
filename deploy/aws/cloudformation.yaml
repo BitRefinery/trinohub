@@ -181,6 +181,10 @@ Resources:
                 Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*"
                 Condition:
                   StringEquals: { iam:AWSServiceName: autoscaling.amazonaws.com }
+              - Sid: SendDigestEmail
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: "*"
 
   ControlPlaneInstanceProfile:
     Type: AWS::IAM::InstanceProfile

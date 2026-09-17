@@ -70,6 +70,12 @@
           "iam:AWSServiceName": "autoscaling.amazonaws.com"
         }
       }
+    },
+    {
+      "Sid": "SendDigestEmail",
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": "*"
     }
   ]
 }

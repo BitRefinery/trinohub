@@ -10,6 +10,19 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ## [Unreleased]
 
+### Added
+
+- **Email digests for scheduled jobs.** A job can list recipients; each time it
+  fires it runs once per recipient, as that recipient, and emails each person
+  their own result through Amazon SES. Row filters and grants therefore apply
+  per person, so one shared digest shows every store manager only their store.
+  Digests must be read-only, recipients other than yourself require
+  `MANAGE_USERS`, a failed run retries for that recipient alone, and delivery
+  status is recorded on each run. A new **Settings → Email** panel configures
+  the sender, SES region and public URL, and sends a test message. Email links
+  open the query directly in Query history (`#history/<id>`). The control-plane
+  IAM policy gains `ses:SendEmail`.
+
 ### Changed
 
 - **Data policy changes reach running clusters without a restart.** Access-control
