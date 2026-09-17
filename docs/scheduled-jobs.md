@@ -69,3 +69,11 @@ Rules:
 
 Email must be enabled in **Settings → Email** first (see **Settings &
 security**).
+
+### Replies to a digest
+
+When **Ask by email** is also on, a digest's *Reply-To* is the inbound address,
+so a recipient can simply reply — *"Why is Store 3 so low?"* — and get an
+answer that already knows what the digest said. The jobs table shows how many
+follow-up replies each digest received in the last 30 days: replies are the
+sign a digest is being read and acted on.

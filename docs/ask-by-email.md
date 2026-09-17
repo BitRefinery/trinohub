@@ -19,6 +19,13 @@ Every reply has:
 - **Links to the queries** in **Query history**, so anyone with access can see
   exactly where a number came from.
 
+## Replying to a digest
+
+If you receive a scheduled digest by email, reply to it with a follow-up
+question. The assistant sees the digest you are replying to, so *"why is that
+number down?"* works without restating it. Only the digest's own recipient gets
+that context — a forwarded digest is answered as a fresh question.
+
 ## Whose data you see
 
 The assistant acts **as you**. It can only query what your TrinoHub account can

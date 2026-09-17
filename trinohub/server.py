@@ -348,6 +348,8 @@ EMAIL_QUESTIONS_PER_HOUR = 20
 INBOUND_BATCH_SIZE = 5
 INBOUND_WAIT_SECONDS = 20
 MAX_EMAIL_CONVERSATIONS_LISTED = 100
+FOLLOW_UP_WINDOW_DAYS = 30
+DIGEST_CONTEXT_MAX_CHARS = 4000
 COST_WINDOW_DAYS = 30
 UPTIME_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 UPTIME_WINDOW_PATTERN = re.compile(r"([0-2]\d):([0-5]\d)-([0-2]\d):([0-5]\d)")
@@ -2111,7 +2113,26 @@ class TrinoHubApp:
             rows = conn.execute(
                 f"SELECT * FROM scheduled_jobs {where} ORDER BY created_at DESC", params
             ).fetchall()
-        return {"jobs": [self.public_job(row) for row in rows]}
+            since = (datetime.now(timezone.utc) - timedelta(days=FOLLOW_UP_WINDOW_DAYS)).isoformat(timespec="seconds")
+            follow_ups = {
+                row["job_id"]: row["replies"]
+                for row in conn.execute(
+                    """
+                    SELECT r.job_id, COUNT(*) AS replies FROM email_conversations c
+                    JOIN scheduled_job_runs r ON r.id = c.job_run_id
+                    WHERE c.created_at >= ?
+                    GROUP BY r.job_id
+                    """,
+                    (since,),
+                ).fetchall()
+            }
+        jobs = []
+        for row in rows:
+            job = self.public_job(row)
+            # Replies to a digest are the signal that it is being read and acted on.
+            job["follow_ups_30d"] = int(follow_ups.get(row["id"], 0))
+            jobs.append(job)
+        return {"jobs": jobs}
 
     def update_job(self, job_id: int, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
         with self.conn() as conn:
@@ -2389,16 +2410,25 @@ class TrinoHubApp:
             if not query:
                 raise ApiError(404, "The run's query record is gone.")
             message = self.render_digest_email(job, row_to_dict(query))
-            self.send_email([address], message["subject"], message["text"], message["html"])
+            settings = self.email_settings()
+            # When emailed questions are on, replying to a digest asks a
+            # follow-up: route replies to the inbound address.
+            reply_to = [settings["inbound_address"]] if settings["inbound_enabled"] and settings["inbound_address"] else None
+            sent = self.send_email([address], message["subject"], message["text"], message["html"], reply_to=reply_to)
+            message_id = str(sent.get("message_id") or "")
         except ApiError as exc:
-            status, error = "failed", exc.message
+            status, error, message_id = "failed", exc.message, ""
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Digest delivery failed: {type(exc).__name__}: {exc}")
-            status, error = "failed", "an unexpected internal error (check the service logs)."
+            status, error, message_id = "failed", "an unexpected internal error (check the service logs).", ""
         with self.conn() as conn:
             conn.execute(
-                "UPDATE scheduled_job_runs SET delivery_status = ?, delivery_error = ?, delivered_at = ? WHERE id = ?",
-                (status, error, utc_now(), run_id),
+                """
+                UPDATE scheduled_job_runs
+                SET delivery_status = ?, delivery_error = ?, delivered_at = ?, delivery_message_id = ?
+                WHERE id = ?
+                """,
+                (status, error, utc_now(), message_id, run_id),
             )
         if status == "failed":
             self.notify(
@@ -2603,14 +2633,20 @@ class TrinoHubApp:
                 self._safe_reply(inbound, "I couldn't find a question in your email. Reply with what you'd like to know.")
             return {"status": "refused", "detail": "empty question"}
 
+        digest_run = self._digest_run_for_reply(inbound, user["id"])
         # Claim the message before the slow part so a redelivery can't answer twice.
-        if not self._record_email(inbound, status="answering", user_id=user["id"]):
+        if not self._record_email(
+            inbound, status="answering", user_id=user["id"], job_run_id=digest_run["id"] if digest_run else None
+        ):
             return {"status": "duplicate"}
+        history = self._email_thread_history(inbound, user["id"])
+        if digest_run:
+            history = [self._digest_context_turn(digest_run)] + history
         try:
             outcome = email_agent.run_agent(
                 inbound.question,
                 system_prompt=email_agent.build_agent_system_prompt(user["username"], utc_now()[:10]),
-                history=self._email_thread_history(inbound, user["id"]),
+                history=history,
                 chat=self.call_agent_llm,
                 execute_tool=lambda name, arguments: self.email_agent_tool(name, arguments, user),
             )
@@ -2641,7 +2677,50 @@ class TrinoHubApp:
             {"path": outcome.path, "templates": outcome.templates, "query_ids": outcome.query_ids,
              "tools": outcome.tool_calls, "status": status},
         )
-        return {"status": status, "path": outcome.path, "query_ids": outcome.query_ids, "answer": outcome.answer}
+        return {
+            "status": status,
+            "path": outcome.path,
+            "query_ids": outcome.query_ids,
+            "answer": outcome.answer,
+            "job_run_id": digest_run["id"] if digest_run else None,
+        }
+
+    def _digest_run_for_reply(self, inbound: email_agent.InboundEmail, user_id: int) -> dict[str, Any] | None:
+        """The digest this email replies to, if any. Providers wrap the sent id
+        in a Message-ID such as <id@region.amazonses.com>, so match on the local
+        part. Only the digest's own recipient can link to it."""
+        local_parts = [
+            value.strip("<>").split("@", 1)[0]
+            for value in [*inbound.references, inbound.in_reply_to]
+            if value and "@" in value
+        ]
+        if not local_parts:
+            return None
+        placeholders = ", ".join("?" for _ in local_parts)
+        with self.conn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT r.*, j.name AS job_name FROM scheduled_job_runs r
+                JOIN scheduled_jobs j ON j.id = r.job_id
+                WHERE r.recipient_user_id = ? AND r.delivery_status = 'sent'
+                  AND r.delivery_message_id != '' AND r.delivery_message_id IN ({placeholders})
+                ORDER BY r.id DESC LIMIT 1
+                """,
+                (user_id, *local_parts),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def _digest_context_turn(self, run: dict[str, Any]) -> dict[str, str]:
+        """The digest the person is replying to, as an earlier assistant turn,
+        so "why is store 3 down?" has the numbers it refers to."""
+        with self.conn() as conn:
+            query = conn.execute("SELECT * FROM query_runs WHERE id = ?", (run["query_id"],)).fetchone()
+        if query:
+            body = self.render_digest_email({"name": run["job_name"]}, row_to_dict(query))["text"]
+        else:
+            body = f"(The results of the scheduled digest {run['job_name']} are no longer available.)"
+        content = f"Earlier I emailed you the scheduled digest \"{run['job_name']}\":\n\n{body}"
+        return {"role": "assistant", "content": content[:DIGEST_CONTEXT_MAX_CHARS]}
 
     def _finish_email(self, inbound: email_agent.InboundEmail, **fields: Any) -> None:
         assignments = ", ".join(f"{key} = ?" for key in fields)
@@ -2721,8 +2800,11 @@ class TrinoHubApp:
         with self.conn() as conn:
             rows = conn.execute(
                 """
-                SELECT email_conversations.*, users.username FROM email_conversations
+                SELECT email_conversations.*, users.username, scheduled_jobs.name AS job_name
+                FROM email_conversations
                 LEFT JOIN users ON users.id = email_conversations.user_id
+                LEFT JOIN scheduled_job_runs ON scheduled_job_runs.id = email_conversations.job_run_id
+                LEFT JOIN scheduled_jobs ON scheduled_jobs.id = scheduled_job_runs.job_id
                 ORDER BY email_conversations.id DESC LIMIT ?
                 """,
                 (max(1, min(int(limit), MAX_EMAIL_CONVERSATIONS_LISTED)),),
@@ -2741,6 +2823,7 @@ class TrinoHubApp:
                     "query_ids": loads(row["query_ids_json"], []),
                     "status": row["status"],
                     "detail": row["detail"],
+                    "reply_to_job": row["job_name"] or "",
                     "created_at": row["created_at"],
                 }
                 for row in rows
@@ -3351,6 +3434,7 @@ class TrinoHubApp:
         html_body: str = "",
         *,
         headers: dict[str, str] | None = None,
+        reply_to: list[str] | None = None,
     ) -> dict[str, Any]:
         """Send through the provider, raising ApiError with an operator-safe
         message on misconfiguration or provider failure."""
@@ -3366,6 +3450,7 @@ class TrinoHubApp:
                 text_body=text_body,
                 html_body=html_body,
                 headers=headers or None,
+                reply_to=reply_to or None,
             )
         except Exception as exc:
             print(f"Email send failed: {type(exc).__name__}: {exc}")

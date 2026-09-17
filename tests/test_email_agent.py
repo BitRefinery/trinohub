@@ -369,6 +369,82 @@ class InboundServerTests(unittest.TestCase):
         self.assertEqual(self.app.poll_inbound_email_once(), 0)
         self.assertEqual(self.aws.deleted, [])
 
+    def _delivered_digest(self, recipient="dana"):
+        """A digest job with one run already delivered to ``recipient``."""
+        cluster = self.app.create_cluster({"name": "pilot", "instance_type": "r7i.2xlarge"}, self.admin)["cluster"]
+        job = self.app.create_job(
+            {"name": "Daily sales", "sql": "SELECT store, net_sales FROM sales", "cluster_id": cluster["id"],
+             "schedule_type": "cron", "cron_expression": "0 7 * * *", "recipients": [recipient]},
+            self.admin,
+        )["job"]
+        user = self._user(recipient)
+        with self.app.conn() as conn:
+            query_id = conn.execute(
+                """
+                INSERT INTO query_runs (user_id, cluster_id, sql_text, status, columns_json, data_json,
+                                        row_count, total_row_count, created_at, updated_at)
+                VALUES (?, ?, 'SELECT 1', 'Finished', '[{"name":"store"},{"name":"net_sales"}]',
+                        '[["Store 3", 410.5]]', 1, 1, '2026-09-16T07:00:00+00:00', '2026-09-16T07:00:05+00:00')
+                """,
+                (user["id"], cluster["id"]),
+            ).lastrowid
+            run_id = conn.execute(
+                """
+                INSERT INTO scheduled_job_runs (job_id, query_id, attempt, status, started_at, recipient_user_id)
+                VALUES (?, ?, 1, 'Succeeded', '2026-09-16T07:00:00+00:00', ?)
+                """,
+                (job["id"], query_id, user["id"]),
+            ).lastrowid
+        self.app._deliver_job_run(run_id, dict(job, sql_text=job["sql"]), user, query_id)
+        return job, run_id
+
+    def test_digest_delivery_routes_replies_to_the_inbound_address_and_keeps_the_message_id(self):
+        _, run_id = self._delivered_digest()
+        [mail] = self.aws.sent_emails
+        self.assertEqual(mail["reply_to"], ["ask@trinohub.example.com"])
+        with self.app.conn() as conn:
+            row = conn.execute("SELECT delivery_status, delivery_message_id FROM scheduled_job_runs WHERE id = ?", (run_id,)).fetchone()
+        self.assertEqual((row["delivery_status"], row["delivery_message_id"]), ("sent", "msg-1"))
+
+    def test_reply_to_a_digest_is_linked_counted_and_given_the_digest_as_context(self):
+        job, run_id = self._delivered_digest()
+        self.template_answer(answer="Store 3 had two closed registers.")
+        reply = raw_email(
+            subject="Re: Daily sales — 2026-09-16",
+            body="Why is Store 3 so low?\n\nOn Tue, Sep 16, 2026 TrinoHub wrote:\n> Daily sales",
+            message_id="<r1@mail.example.com>",
+            extra_headers="In-Reply-To: <msg-1@us-west-2.amazonses.com>\r\nReferences: <msg-1@us-west-2.amazonses.com>\r\n",
+        )
+        result = self.app.handle_inbound_email(ses_notification(reply, ses_id="ses-digest"))
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["job_run_id"], run_id)
+        digest_turn = self.llm_calls[0][1]
+        self.assertEqual(digest_turn["role"], "assistant")
+        self.assertIn('scheduled digest "Daily sales"', digest_turn["content"])
+        self.assertIn("Store 3 | 410.5", digest_turn["content"])
+        self.assertEqual(self.llm_calls[0][2], {"role": "user", "content": "Why is Store 3 so low?"})
+
+        [listed] = [j for j in self.app.list_jobs(self.admin)["jobs"] if j["id"] == job["id"]]
+        self.assertEqual(listed["follow_ups_30d"], 1)
+        self.assertEqual(self.conversations()[0]["reply_to_job"], "Daily sales")
+
+    def test_only_the_digest_recipient_can_link_to_it(self):
+        self._delivered_digest(recipient="dana")
+        self.app.create_user(
+            {"username": "fay", "password": "pw-123456789", "roles": ["user", "store-managers"], "email": "fay@example.com"},
+            self.admin,
+        )
+        self.template_answer()
+        forwarded = raw_email(
+            sender="fay@example.com",
+            message_id="<f1@mail.example.com>",
+            extra_headers="References: <msg-1@us-west-2.amazonses.com>\r\n",
+        )
+        result = self.app.handle_inbound_email(ses_notification(forwarded, ses_id="ses-fwd"))
+        self.assertEqual(result["status"], "answered")
+        self.assertIsNone(result["job_run_id"])
+        self.assertFalse(any("scheduled digest" in str(m.get("content")) for m in self.llm_calls[0]))
+
     def test_inbound_settings_validation(self):
         with self.assertRaises(ApiError):
             self.app.set_email_settings({"inbound_queue_url": "https://example.com/queue"}, self.admin)

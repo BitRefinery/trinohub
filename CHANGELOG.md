@@ -25,6 +25,12 @@ Anything landing on `main` between releases goes under **Unreleased**.
   earlier questions. Senders are limited to 20 questions an hour, every inbound
   email is recorded under **Settings → Emailed questions**, and the control-plane
   IAM policy gains SQS receive/delete on `trinohub-inbound*` queues.
+- **Digest follow-ups.** With emailed questions on, digests set *Reply-To* to
+  the inbound address and remember the sent message id. A reply from the
+  digest's recipient is linked to that run, answered with the digest's contents
+  as context, and counted: the jobs table shows each digest's follow-up replies
+  over the last 30 days, and Emailed questions marks which digest a question
+  replied to.
 - **Email digests for scheduled jobs.** A job can list recipients; each time it
   fires it runs once per recipient, as that recipient, and emails each person
   their own result through Amazon SES. Row filters and grants therefore apply
