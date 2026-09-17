@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  TrinoHub email front door — the AWS plumbing for scheduled-job digests and
+  Ask by email. Verifies the mail domain in SES, routes the inbound address
+  through an SES receipt rule to SNS and an SQS queue the control plane pulls,
+  and grants the existing control-plane role send/receive access. Deploy it in
+  a region where SES supports receiving email, alongside the main stack.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Mail" }
+        Parameters: [MailDomain, InboundAddress]
+      - Label: { default: "Wiring" }
+        Parameters: [ControlPlaneRoleName, QueueName, ReceiptRuleSetName]
+
+Parameters:
+  MailDomain:
+    Type: String
+    Description: >-
+      Domain you send from and receive at, for example trinohub.example.com.
+      A subdomain dedicated to TrinoHub keeps its MX record away from your
+      normal mail.
+    AllowedPattern: "^([a-z0-9-]+\\.)+[a-z]{2,}$"
+    ConstraintDescription: A lowercase domain name such as trinohub.example.com.
+  InboundAddress:
+    Type: String
+    Description: The address people email questions to, on MailDomain (for example ask@trinohub.example.com).
+    AllowedPattern: "^[a-z0-9._+-]+@([a-z0-9-]+\\.)+[a-z]{2,}$"
+    ConstraintDescription: A lowercase email address.
+  ControlPlaneRoleName:
+    Type: String
+    Default: TrinoHubControlPlaneRole
+    Description: The IAM role the TrinoHub control plane runs as (created by the main stack).
+  QueueName:
+    Type: String
+    Default: trinohub-inbound
+    AllowedPattern: "^trinohub-inbound[A-Za-z0-9_-]*$"
+    Description: SQS queue name. Must start with trinohub-inbound, which the main stack's role policy expects.
+  ReceiptRuleSetName:
+    Type: String
+    Default: trinohub
+    Description: >-
+      SES receipt rule set to create. A region has one ACTIVE rule set; if you
+      already receive mail with SES here, add the rule to your active set instead.
+
+Resources:
+  MailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref MailDomain
+      DkimAttributes:
+        SigningEnabled: true
+
+  InboundQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref QueueName
+      # Answering one email can take a minute of LLM and query time.
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+
+  InboundTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${QueueName}-mail"
+
+  InboundTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref InboundTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSesPublish
+            Effect: Allow
+            Principal: { Service: ses.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref InboundTopic
+            Condition:
+              StringEquals: { "AWS:SourceAccount": !Ref "AWS::AccountId" }
+
+  InboundQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref InboundQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowTopicDelivery
+            Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt InboundQueue.Arn
+            Condition:
+              ArnEquals: { "aws:SourceArn": !Ref InboundTopic }
+
+  InboundSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: InboundQueuePolicy
+    Properties:
+      TopicArn: !Ref InboundTopic
+      Protocol: sqs
+      Endpoint: !GetAtt InboundQueue.Arn
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSetName
+
+  InboundReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn: [InboundTopicPolicy, InboundSubscription]
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: trinohub-ask
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Require
+        Recipients: [!Ref InboundAddress]
+        Actions:
+          - SNSAction:
+              TopicArn: !Ref InboundTopic
+              Encoding: UTF-8
+
+  ControlPlaneMailAccess:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: TrinoHubEmailFrontDoor
+      Roles: [!Ref ControlPlaneRoleName]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SendDigestEmail
+            Effect: Allow
+            Action: ses:SendEmail
+            Resource: "*"
+          - Sid: ReadInboundEmailQueue
+            Effect: Allow
+            Action: [sqs:ReceiveMessage, sqs:DeleteMessage]
+            Resource: !GetAtt InboundQueue.Arn
+
+Outputs:
+  InboundQueueUrl:
+    Description: Paste into TrinoHub Settings → Email → Inbound SQS queue URL.
+    Value: !Ref InboundQueue
+  InboundAddress:
+    Description: Paste into TrinoHub Settings → Email → Inbound address.
+    Value: !Ref InboundAddress
+  MxRecord:
+    Description: Add this MX record for MailDomain so SES receives its mail.
+    Value: !Sub "${MailDomain}. MX 10 inbound-smtp.${AWS::Region}.amazonaws.com"
+  DkimRecords:
+    Description: Add these three CNAME records so SES can verify and sign for MailDomain.
+    Value: !Join
+      - "  |  "
+      - - !Sub "${MailIdentity.DkimDNSTokenName1} CNAME ${MailIdentity.DkimDNSTokenValue1}"
+        - !Sub "${MailIdentity.DkimDNSTokenName2} CNAME ${MailIdentity.DkimDNSTokenValue2}"
+        - !Sub "${MailIdentity.DkimDNSTokenName3} CNAME ${MailIdentity.DkimDNSTokenValue3}"
+  ActivateRuleSet:
+    Description: CloudFormation cannot activate a receipt rule set; run this once.
+    Value: !Sub "aws ses set-active-receipt-rule-set --rule-set-name ${ReceiptRuleSet} --region ${AWS::Region}"

@@ -100,6 +100,48 @@ database under `.trinohub/`. Back up that directory before an upgrade and verify
 the UI and `GET /api/health` afterward. New or replacement stack instances can
 select the same tag with `--parameter-overrides GitRef=v0.2.0 ...`.
 
+## Email front door (optional)
+
+`email-front-door.yaml` adds the AWS side of scheduled-job digests and **Ask by
+email**: an SES domain identity with DKIM, an SES receipt rule for the inbound
+address, an SNS topic and SQS queue, and a policy on `TrinoHubControlPlaneRole`
+for `ses:SendEmail` plus receive/delete on the queue. It works with a control
+plane launched by this stack or an existing one.
+
+Deploy it in a region where SES can **receive** email (for example `us-east-1`,
+`us-west-2`, `eu-west-1`), using a domain you control — a dedicated subdomain
+keeps its MX record away from your normal mail:
+
+```bash
+aws cloudformation deploy \
+  --region us-east-1 \
+  --stack-name trinohub-email \
+  --template-file email-front-door.yaml \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      MailDomain=trinohub.example.com \
+      InboundAddress=ask@trinohub.example.com
+
+aws cloudformation describe-stacks --region us-east-1 --stack-name trinohub-email \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+Then, from the outputs:
+
+1. Add the three **DkimRecords** CNAMEs and the **MxRecord** to your DNS.
+2. Run the **ActivateRuleSet** command once. A region has a single active rule
+   set — if you already receive mail with SES there, move the `trinohub-ask`
+   rule into your active set instead.
+3. If the account is still in the SES sandbox, request production access
+   (the sandbox only delivers to verified addresses).
+4. In TrinoHub **Settings → Email**: from address on the domain (for example
+   `reports@trinohub.example.com`), **SES region** = the stack's region, the
+   public URL, then **Answer emailed questions** with **InboundAddress** and
+   **InboundQueueUrl**.
+
+See [`docs/ask-by-email.md`](../../docs/ask-by-email.md) for granting
+`ASK_BY_EMAIL` and curating answers.
+
 ## Teardown
 
 Deleting the stack removes the instance, security group, and IAM roles. **It does

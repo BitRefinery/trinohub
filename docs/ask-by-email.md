@@ -50,17 +50,21 @@ Answering email builds on outbound email (see **Settings & security → Email**)
 and the Ask Trino model configuration (`OPENROUTER_API_KEY`; the model chosen in
 **Settings → Ask Trino** must support tool calling).
 
-1. **Receive mail in SES.** Verify the domain of the inbound address in Amazon
-   SES and point its MX record at SES inbound for a
-   [region that supports receiving](https://docs.aws.amazon.com/ses/latest/dg/regions.html#region-receive-email).
-2. **Route it to a queue.** Create an SQS queue (for example
-   `trinohub-inbound`) and an SNS topic subscribed by it. Add an SES receipt rule
-   for the inbound address with an **SNS action**, encoding UTF-8 (SNS actions
-   carry messages up to 150 KB).
-3. **Grant the control-plane role** `sqs:ReceiveMessage` and
-   `sqs:DeleteMessage` on the queue. The CloudFormation stack and
-   `deploy/iam-control-plane-policy.json` grant this for queues named
-   `trinohub-inbound*`; an existing role must be updated by hand.
+1. **Deploy the email stack.** `deploy/aws/email-front-door.yaml` creates
+   everything on the AWS side in one go: the SES domain identity, the receipt
+   rule for the inbound address, the SNS topic and SQS queue, and the
+   control-plane role's send/receive permissions. Deploy it in a
+   [region where SES receives email](https://docs.aws.amazon.com/ses/latest/dg/regions.html#region-receive-email)
+   (see `deploy/aws/README.md → Email front door`). Doing it by hand instead:
+   verify the domain, add a receipt rule with an **SNS action** (encoding UTF-8;
+   SNS actions carry messages up to 150 KB) to a topic subscribed by an SQS
+   queue named `trinohub-inbound*`, and grant the control-plane role
+   `ses:SendEmail`, `sqs:ReceiveMessage` and `sqs:DeleteMessage`.
+2. **Publish DNS and activate.** Add the stack's DKIM CNAME and MX records to
+   your DNS, run its `ActivateRuleSet` command once, and — if the account is in
+   the SES sandbox — request production access.
+3. **Set the email region.** In **Settings → Email**, set **SES region** to the
+   stack's region if it differs from the control plane's.
 4. **Turn it on** in **Settings → Email**: tick **Answer emailed questions**
    and enter the inbound address and the queue URL.
 5. **Grant access**: create or edit a role with `ASK_BY_EMAIL` and put people
