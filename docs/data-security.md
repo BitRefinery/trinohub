@@ -22,9 +22,12 @@ account**:
 So you grant restricted access by putting a user in a role that *has* policies;
 unrestricted users fall through to a catch-all.
 
-> **Policies apply when a cluster (re)starts.** The rules are written into each
-> node's Trino config at boot, so create or change policies and then start (or
-> suspend and resume) the cluster for them to take effect.
+> **Policy changes reach running clusters within about two minutes.** Each
+> node pulls the current rules from TrinoHub every minute and Trino re-reads
+> them without a restart, so creating a policy, editing one, or adding a user
+> to a restricted role takes effect on its own. A failed pull keeps the last
+> good rules. Clusters started before this release pick up the refresh the
+> next time they start (or suspend and resume).
 
 ## Data policies
 
@@ -37,6 +40,9 @@ Create a policy for a role with:
 - **Allowed columns** — an allow-list; every other known column is denied.
 - **Row filter** — a SQL boolean expression; the role only sees rows where it
   is true (for example `region = 'EU'`).
+  Filters can use `current_user` to scope rows per person without a role per
+  value — for example, with a mapping table of who manages which store:
+  `store_id IN (SELECT store_id FROM ref.user_stores WHERE username = current_user)`.
 - **Column masks** — replace a column's value with an expression per role, for
   example `email = substr(email, 1, 3) || '…'`. Use `NULL` to blank it.
 
@@ -74,4 +80,4 @@ active, or **Reject** discards it. Only accepted tags feed tag policies.
 Every change is reflected in the access-control rules a cluster will apply.
 Admins can preview the exact `rules.json` for a cluster at
 `GET /api/clusters/{id}/access-rules` (see the OpenAPI docs) to confirm what
-the engine will enforce before restarting.
+the engine will enforce.

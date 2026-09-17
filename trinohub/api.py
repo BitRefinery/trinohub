@@ -1072,6 +1072,10 @@ def create_app(
     ) -> dict[str, Any]:
         return control.delete_connector_driver(connector_type)
 
+    @api.get("/api/node-config/{cluster_id}/access-rules", response_class=PlainTextResponse, include_in_schema=False)
+    def node_access_rules(cluster_id: int, token: str) -> PlainTextResponse:
+        return PlainTextResponse(control.node_access_rules(cluster_id, token), media_type="application/json")
+
     @api.get("/api/node-config/{cluster_id}/driver/{connector_type}", include_in_schema=False)
     def node_driver(cluster_id: int, connector_type: str, token: str) -> FileResponse:
         path, filename = control.node_driver_file(cluster_id, connector_type, token)

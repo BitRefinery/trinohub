@@ -6024,6 +6024,47 @@ class FineGrainedSecurityTests(unittest.TestCase):
             after = self.app.resolve_entity_tag(still_proposed[0]["id"], False, self.admin)
             self.assertFalse(any(tag["id"] == still_proposed[0]["id"] for tag in after["tags"]))
 
+    def test_refreshable_node_boots_with_file_access_control_and_pull_timer(self):
+        with self.app.conn() as conn:
+            token = self.app.create_cluster_bootstrap_token(conn, self.cluster["id"])
+        # No policies yet: the node still gets file access control (allow-all),
+        # since Trino only loads access-control.properties at startup.
+        script = self.app.node_config_script(
+            cluster_id=self.cluster["id"], role="coordinator", token=token, instance_type="r7i.2xlarge"
+        )
+        self.assertIn("access-control.name=file", script)
+        self.assertIn("security.refresh-period=30s", script)
+        self.assertIn("cat >/etc/trino/rules.json <<'EOF'\n{}\nEOF", script)
+        self.assertIn(
+            f"/api/node-config/{self.cluster['id']}/access-rules?token={token}", script
+        )
+        self.assertIn("systemctl enable --now trinohub-access-rules.timer", script)
+        self.assertIn("python3 -m json.tool", script)
+
+    def test_node_access_rules_pull_reflects_policy_changes(self):
+        with self.app.conn() as conn:
+            token = self.app.create_cluster_bootstrap_token(conn, self.cluster["id"])
+        self.assertEqual(self.app.node_access_rules(self.cluster["id"], token), "{}")
+        self.app.create_data_policy(
+            {"role": "analysts", "catalog": "tpch", "row_filter": "store_id = 1"}, self.admin
+        )
+        rules = json.loads(self.app.node_access_rules(self.cluster["id"], token))
+        self.assertTrue(any(rule.get("filter") == "store_id = 1" for rule in rules["tables"]))
+        with self.assertRaises(ApiError) as caught:
+            self.app.node_access_rules(self.cluster["id"], "wrong-token")
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_rules_without_control_plane_uri_skip_refresh(self):
+        script = self.app.aws.trino_node_config_script(
+            cluster={"name": "secure", "catalogs": ["system", "tpch"]},
+            node_role="worker",
+            region="us-east-2",
+            access_control_rules="{}",
+        )
+        self.assertIn("access-control.name=file", script)
+        self.assertNotIn("security.refresh-period", script)
+        self.assertNotIn("trinohub-access-rules", script)
+
 
 class AcceleratedClusterTests(unittest.TestCase):
     """Phase 4: accelerated clusters cache hot S3 data on local NVMe."""

@@ -26,6 +26,10 @@ IMDS_BASE = "http://169.254.169.254/latest"
 SUPPORTED_TRINO_VERSIONS = ["482", "481", "480", "479"]
 TRINO_VERSION = SUPPORTED_TRINO_VERSIONS[0]
 TRINO_HTTP_PORT = 8080
+# Access-control rules reach a running cluster in at most the sum of these:
+# the node pulls from the control plane, then Trino re-reads the file.
+ACCESS_RULES_PULL_SECONDS = 60
+ACCESS_RULES_TRINO_REFRESH = "30s"
 
 # Discovery source: the GitHub releases API for trinodb/trino — the same place
 # node bootstrap downloads the server tarball from, so anything listed here is
@@ -1083,17 +1087,70 @@ done
 chown -R "$TRINO_USER:$TRINO_USER" "$CACHE_ROOT"
 """
         # Fine-grained data policies: render Trino's file-based system access
-        # control. Absent policies, no files are written and the engine stays
+        # control. Absent rules, no files are written and the engine stays
         # open (control-plane grants still gate the API).
         access_control_commands = ""
         if access_control_rules:
+            refresh_properties = ""
+            refresh_commands = ""
+            if control_plane_uri and cluster_id and bootstrap_token:
+                # Nodes pull the rules from the control plane every minute and
+                # Trino re-reads the file, so policy and role-membership changes
+                # apply without restarting the cluster. A failed or malformed
+                # fetch leaves the last good rules in place.
+                rules_url = (
+                    f"{control_plane_uri.rstrip('/')}/api/node-config/{cluster_id}/access-rules"
+                    f"?token={bootstrap_token}"
+                )
+                refresh_properties = f"\nsecurity.refresh-period={ACCESS_RULES_TRINO_REFRESH}"
+                refresh_commands = f"""
+cat >/etc/trinohub/access-rules.env <<'EOF'
+TRINOHUB_RULES_URL="{rules_url}"
+EOF
+chmod 0600 /etc/trinohub/access-rules.env
+cat >/usr/local/sbin/trinohub-refresh-access-rules <<'EOF'
+#!/bin/bash
+set -euo pipefail
+. /etc/trinohub/access-rules.env
+tmp="$(mktemp /etc/trino/.rules.json.XXXXXX)"
+trap 'rm -f "$tmp"' EXIT
+curl --fail --silent --show-error --max-time 20 "$TRINOHUB_RULES_URL" --output "$tmp"
+python3 -m json.tool "$tmp" >/dev/null
+if ! cmp -s "$tmp" /etc/trino/rules.json; then
+  chown trino:trino "$tmp"
+  chmod 0640 "$tmp"
+  mv "$tmp" /etc/trino/rules.json
+fi
+EOF
+chmod 0700 /usr/local/sbin/trinohub-refresh-access-rules
+cat >/etc/systemd/system/trinohub-access-rules.service <<'EOF'
+[Unit]
+Description=Refresh Trino access-control rules from TrinoHub
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/trinohub-refresh-access-rules
+EOF
+cat >/etc/systemd/system/trinohub-access-rules.timer <<'EOF'
+[Unit]
+Description=Refresh Trino access-control rules from TrinoHub
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={ACCESS_RULES_PULL_SECONDS}s
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now trinohub-access-rules.timer"""
             access_control_commands = f"""cat >/etc/trino/rules.json <<'EOF'
 {access_control_rules}
 EOF
 cat >/etc/trino/access-control.properties <<'EOF'
 access-control.name=file
-security.config-file=/etc/trino/rules.json
-EOF"""
+security.config-file=/etc/trino/rules.json{refresh_properties}
+EOF{refresh_commands}"""
         enabled_catalogs = "\n".join(catalogs)
         return f"""#!/bin/bash
 set -euo pipefail
