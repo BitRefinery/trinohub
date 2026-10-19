@@ -17,6 +17,9 @@ renderer (``AwsInspector.jdbc_catalog_properties``), both parameterized by the
 descriptor. ``mongodb``, ``elasticsearch``, ``bigquery``, and ``gsheets`` each
 have a bespoke ``kind`` with their own normalizer + renderer (``opensearch``
 reuses the ``elasticsearch`` pair, parameterized by ``connector_name``).
+``openapi`` turns any HTTP API with an OpenAPI spec into tables through the
+third-party nineinchnick/trino-openapi plugin, which nodes install from a pinned
+release (:class:`BundledPlugin`) rather than from an operator upload.
 ``bigquery`` and ``gsheets`` are the cross-cloud types, whose stored credential is
 a GCP service-account JSON key (``credential_kind="gcp_service_account"``) rather
 than a DB password. ``generator`` types (``memory``/``blackhole``/``faker``) are
@@ -30,6 +33,22 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BundledPlugin:
+    """A third-party Trino plugin that nodes download from a pinned release.
+
+    Unlike an uploaded driver, the archive is fixed in code: nodes fetch ``url``,
+    verify ``sha256`` before unpacking, and copy the ``archive_root`` directory
+    into the connector's plugin dir. A plugin is built against one Trino SPI, so
+    it is only offered on the ``trino_versions`` it was tested with.
+    """
+
+    url: str
+    sha256: str
+    archive_root: str
+    trino_versions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -61,6 +80,8 @@ class ConnectorType:
     # stored, and the catalog then renders only on the signed node path. Mutually
     # exclusive with requires_secret.
     optional_secret: bool = False
+    # Installed from a pinned release instead of an operator upload.
+    bundled_plugin: BundledPlugin | None = None
 
     @property
     def is_jdbc(self) -> bool:
@@ -95,6 +116,27 @@ _TRINO_URL = re.compile(r"jdbc:trino://([^/:?\s]+)(?::\d+)?(?:/[^\s?]*)?(?:\?\S*
 _DRUID_URL = re.compile(r"jdbc:avatica:remote:url=https?://([^/:?\s]+)(?::\d+)?/[^\s;]*(?:;\S*)?")
 # MongoDB shares the connection-URL + user + password shape; the URL must NOT
 # embed credentials (the @ is excluded), so the password stays in the secret store.
+# OpenAPI spec and API base URLs: HTTPS only, host captured as group 1 for the
+# SSRF guard. Credentials never live in the URL (no "@" before the host).
+OPENAPI_URL = re.compile(r"https://([^/:?#@\s]+)(?::\d+)?(?:[/?]\S*)?")
+# trino-openapi 2.0 builds against Trino 483. Trino 484 changed the connector
+# SPI, but the plugin's metadata, read, and INSERT paths still work there, so
+# both are allowed. Newer Trino releases are added once the plugin is checked on
+# them.
+OPENAPI_PLUGIN = BundledPlugin(
+    url="https://github.com/nineinchnick/trino-openapi/releases/download/v2.0/trino-openapi-2.0.zip",
+    sha256="4ca30622c64de2d6ed79e87059ebc98adad8418be5ff98eba09dd35b40222600",
+    archive_root="trino-openapi-2.0",
+    trino_versions=("483", "484"),
+)
+# auth_type values and the trino-openapi authentication.* properties they map to.
+OPENAPI_AUTH_TYPES = {
+    "none": "No authentication",
+    "basic": "HTTP basic (user + password)",
+    "bearer": "Bearer token",
+    "api_key": "API key",
+}
+
 _MONGODB_URL = re.compile(r"(?:mongodb|mongodb\+srv)://([^/:?@\s]+)(?::\d+)?(?:,[^/?@\s]+)*(?:/[^\s?]*)?(?:\?\S*)?")
 
 
@@ -326,6 +368,19 @@ REGISTRY: dict[str, ConnectorType] = {
         icon="database",
         connector_name="prometheus",
     ),
+    "openapi": ConnectorType(
+        type="openapi",
+        label="OpenAPI (HTTP APIs)",
+        # Auth depends on the API: a credential (password, token, or API key)
+        # is stored only when auth_type is not "none".
+        requires_secret=False,
+        optional_secret=True,
+        kind="openapi",
+        icon="cloud",
+        connector_name="openapi",
+        plugin_dir="openapi",
+        bundled_plugin=OPENAPI_PLUGIN,
+    ),
     "memory": ConnectorType(
         type="memory",
         label="Memory (test tables)",
@@ -398,6 +453,7 @@ _UI_GROUP_BY_KIND = {
     "elasticsearch": "Document & search",
     "cassandra": "Databases",
     "prometheus": "Databases",
+    "openapi": "Web APIs",
     "bigquery": "Google Cloud",
     "gsheets": "Google Cloud",
     "generator": "Test & sample data",
@@ -428,6 +484,7 @@ _UI_DEFAULT_NAME = {
     "opensearch": "logs_os",
     "cassandra": "warehouse_cassandra",
     "prometheus": "metrics_prometheus",
+    "openapi": "api",
     "bigquery": "warehouse_bigquery",
     "gsheets": "sheets",
     "memory": "scratch",
@@ -511,6 +568,21 @@ def _form_fields(spec: ConnectorType) -> list[dict[str, object]]:
             {"name": "connection_user", "label": "Connection user (optional)", "input": "text",
              "placeholder": "leave blank for an unauthenticated server"},
         ]
+    if kind == "openapi":
+        return [
+            {"name": "spec_location", "label": "OpenAPI spec URL", "input": "text", "required": True,
+             "placeholder": "https://api.example.com/openapi.json", "full_width": True},
+            {"name": "base_uri", "label": "API base URL", "input": "text", "required": True,
+             "placeholder": "https://api.example.com/v1", "full_width": True},
+            {"name": "auth_type", "label": "Authentication", "input": "select", "default": "none",
+             "options": [{"value": value, "label": label} for value, label in OPENAPI_AUTH_TYPES.items()]},
+            {"name": "connection_user", "label": "User (basic auth)", "input": "text",
+             "placeholder": "only for HTTP basic"},
+            {"name": "api_key_name", "label": "API key name (if the spec doesn't declare it)",
+             "input": "text", "placeholder": "X-API-Key"},
+            {"name": "access_mode", "label": "Access mode", "input": "select",
+             "options": ["Read only", "Read and write"], "default": "Read only"},
+        ]
     return []  # generator types take no configuration
 
 
@@ -524,6 +596,9 @@ def _credential_field(spec: ConnectorType) -> dict[str, object] | None:
             return {"name": "password", "label": "Azure storage account key", "input": "password",
                     "required_on_create": True, "full_width": True}
         return {"name": "password", "label": "Connection password", "input": "password", "required_on_create": True}
+    if spec.kind == "openapi":
+        return {"name": "password", "label": "Password, token, or API key (if authenticated)",
+                "input": "password", "required_on_create": False}
     if spec.optional_secret:
         # Auth is optional: the password is required only when a username is set,
         # which the client enforces; on the schema it is never required on create.
@@ -542,6 +617,7 @@ def connector_type_schema(spec: ConnectorType) -> dict[str, object]:
         "requires_secret": spec.requires_secret,
         "optional_secret": spec.optional_secret,
         "requires_driver": spec.requires_driver,
+        "trino_versions": list(spec.bundled_plugin.trino_versions) if spec.bundled_plugin else None,
         "credential_kind": spec.credential_kind if (spec.requires_secret or spec.optional_secret) else None,
         "default_name": _UI_DEFAULT_NAME.get(spec.type, spec.type),
         "fields": _form_fields(spec),

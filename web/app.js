@@ -836,6 +836,11 @@ function catalogDescription(catalog) {
     const auth = config.connection_user ? config.connection_user : "no auth";
     return `Prometheus / ${config.uri || "endpoint unset"} / ${auth}`;
   }
+  if (isOpenApiCatalogType(catalog.type)) {
+    const config = catalog.config || {};
+    const mode = config.access_mode === "read_write" ? "read and write" : "read only";
+    return `OpenAPI / ${config.base_uri || "API unset"} / ${mode}`;
+  }
   if (isGeneratorCatalogType(catalog.type)) {
     return GENERATOR_CATALOG_TYPES[catalog.type].description;
   }
@@ -890,6 +895,16 @@ const PROMETHEUS_CATALOG_TYPES = {
 
 function isPrometheusCatalogType(type) {
   return Boolean(PROMETHEUS_CATALOG_TYPES[type]);
+}
+
+// OpenAPI: any HTTP API with an OpenAPI spec, through the trino-openapi plugin.
+// Both URLs are HTTPS. Any auth_type but "none" stores one credential (password,
+// bearer token, or API key). Read only by default, enforced by the cluster's
+// access-control rules. Mirrors the kind="openapi" descriptor.
+const OPENAPI_URL_PATTERN = /^https:\/\/[^/:?#@\s]+(?::\d+)?(?:[/?]\S*)?$/;
+
+function isOpenApiCatalogType(type) {
+  return type === "openapi";
 }
 
 // Zero-config generators (memory/blackhole/faker): name + type only, no fields.
@@ -1085,8 +1100,14 @@ function catalogFieldMarkup(field) {
       break;
     }
     case "select": {
+      // Options are either plain labels (the label is the value) or
+      // {value, label} pairs when the stored value differs from what is shown.
       control = `<select data-field="${name}">${(field.options || [])
-        .map((o) => `<option${o === field.default ? " selected" : ""}>${escapeHtml(o)}</option>`)
+        .map((o) => {
+          const value = typeof o === "object" ? o.value : o;
+          const label = typeof o === "object" ? o.label : o;
+          return `<option value="${escapeHtml(value)}"${value === field.default ? " selected" : ""}>${escapeHtml(label)}</option>`;
+        })
         .join("")}</select>`;
       break;
     }
@@ -1368,7 +1389,7 @@ const CONNECTOR_NAME_BY_TYPE = {
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
   snowflake: "snowflake", druid: "druid", trino: "trino", teradata: "teradata", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "cassandra",
-  prometheus: "prometheus",
+  prometheus: "prometheus", openapi: "openapi",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
 };
 
@@ -1379,7 +1400,7 @@ const CATALOG_GLYPH_BY_TYPE = {
   mariadb: "mariadb", singlestore: "singlestore", clickhouse: "clickhouse", oracle: "oracle",
   snowflake: "snowflake", druid: "druid", trino: "database", teradata: "database", mongodb: "mongodb",
   elasticsearch: "elasticsearch", opensearch: "opensearch", cassandra: "database",
-  prometheus: "database",
+  prometheus: "database", openapi: "database",
   bigquery: "bigquery", gsheets: "gsheets", memory: "memory", blackhole: "blackhole", faker: "faker"
 };
 
@@ -1400,6 +1421,7 @@ const CATALOG_SOURCE_GROUPS = [
   { key: "db", title: "Databases", accent: "#9E3FD6", glyph: "database" },
   { key: "search", title: "Document & search", accent: "#0EA5A9", glyph: "search" },
   { key: "google", title: "Google Cloud", accent: "#E0921C", glyph: "sheet" },
+  { key: "api", title: "Web APIs", accent: "#7C5CE0", glyph: "cloud" },
   { key: "test", title: "Test & sample data", accent: "#64748B", glyph: "flask" },
   { key: "builtin", title: "Built-in & sample", accent: "#16A37B", glyph: "grid" }
 ];
@@ -1419,6 +1441,7 @@ function catalogSourceGroup(catalog) {
   if (catalog.type === "bigquery" || catalog.type === "gsheets") return "google";
   if (isSearchCatalogType(catalog.type) || catalog.type === "mongodb" || isCassandraCatalogType(catalog.type)) return "search";
   if (isGeneratorCatalogType(catalog.type)) return "test";
+  if (isOpenApiCatalogType(catalog.type)) return "api";
   return "db";
 }
 
@@ -1443,6 +1466,7 @@ function catalogTypeLabel(catalog) {
   if (isSearchCatalogType(catalog.type)) return SEARCH_CATALOG_TYPES[catalog.type].label;
   if (isCassandraCatalogType(catalog.type)) return "Apache Cassandra";
   if (isPrometheusCatalogType(catalog.type)) return "Prometheus";
+  if (isOpenApiCatalogType(catalog.type)) return "OpenAPI";
   if (catalog.type === "bigquery") return "Google BigQuery";
   if (catalog.type === "gsheets") return "Google Sheets";
   if (isGeneratorCatalogType(catalog.type)) return GENERATOR_CATALOG_TYPES[catalog.type].label;
@@ -1461,6 +1485,7 @@ function catalogHost(catalog) {
   if (isSearchCatalogType(catalog.type)) return (config.host || "host unset") + ":" + (config.port || 9200);
   if (isCassandraCatalogType(catalog.type)) return config.contact_points || "hosts unset";
   if (isPrometheusCatalogType(catalog.type)) return config.uri || "endpoint unset";
+  if (isOpenApiCatalogType(catalog.type)) return config.base_uri || "API unset";
   if (catalog.type === "bigquery") return config.project_id || "project unset";
   if (catalog.type === "gsheets") return config.metadata_sheet_id ? "metadata sheet set" : "metadata sheet unset";
   return "";
@@ -3647,6 +3672,7 @@ const CATALOG_TYPE_TITLES = {
   opensearch: "OpenSearch catalog",
   cassandra: "Apache Cassandra catalog",
   prometheus: "Prometheus catalog",
+  openapi: "OpenAPI catalog",
   bigquery: "Google BigQuery catalog",
   gsheets: "Google Sheets catalog",
   memory: "Memory catalog",
@@ -3679,6 +3705,7 @@ const CATALOG_TYPE_DEFAULT_NAMES = {
   opensearch: "logs_os",
   cassandra: "warehouse_cassandra",
   prometheus: "metrics_prometheus",
+  openapi: "api",
   bigquery: "warehouse_bigquery",
   gsheets: "sheets",
   memory: "scratch",
@@ -3847,6 +3874,11 @@ function catalogLiveNodes(catalog) {
   } else if (isGeneratorCatalogType(type)) {
     sourceSub = "In-cluster generator";
     authSub = "No endpoint or stored credentials.";
+  } else if (isOpenApiCatalogType(type)) {
+    sourceSub = "HTTP API reachable from the cluster";
+    authSub = catalog.config && catalog.config.auth_type && catalog.config.auth_type !== "none"
+      ? "Credential stored in AWS Secrets Manager, delivered over the signed node channel."
+      : "Unauthenticated — no stored credentials.";
   } else if (isCassandraCatalogType(type) || isPrometheusCatalogType(type)) {
     // Optional-auth connectors: a stored secret exists only when a user is set.
     sourceSub = "Reachable from the cluster VPC";
@@ -4169,6 +4201,22 @@ function catalogPayloadFromForm() {
   if (isGeneratorCatalogType(type)) {
     return { name, type, config: {} };
   }
+  if (isOpenApiCatalogType(type)) {
+    const authType = fieldValue("auth_type") || "none";
+    const config = {
+      spec_location: fieldValue("spec_location").trim(),
+      base_uri: fieldValue("base_uri").trim(),
+      auth_type: authType,
+      access_mode: fieldValue("access_mode") === "Read and write" ? "read_write" : "read_only"
+    };
+    if (authType === "basic") config.connection_user = fieldValue("connection_user").trim();
+    const keyName = fieldValue("api_key_name").trim();
+    if (authType === "api_key" && keyName) config.api_key_name = keyName;
+    const payload = { name, type, config };
+    const password = fieldValue("password");
+    if (password) payload.password = password;
+    return payload;
+  }
   if (type === "gsheets") {
     const payload = {
       name,
@@ -4309,6 +4357,23 @@ function validateCatalogPayload(payload) {
   }
   if (isGeneratorCatalogType(payload.type)) {
     return ""; // name-only; nothing else to validate
+  }
+  if (isOpenApiCatalogType(payload.type)) {
+    if (!OPENAPI_URL_PATTERN.test(payload.config.spec_location)) {
+      return "OpenAPI spec URL must be an https:// URL.";
+    }
+    if (!OPENAPI_URL_PATTERN.test(payload.config.base_uri)) {
+      return "API base URL must be an https:// URL.";
+    }
+    if (payload.config.auth_type === "basic"
+      && !/^[A-Za-z_][A-Za-z0-9_.\-]{0,127}$/.test(payload.config.connection_user || "")) {
+      return "HTTP basic auth needs a valid user.";
+    }
+    // On edit, an empty credential keeps the stored one.
+    if (payload.config.auth_type !== "none" && !editingCatalogId && !payload.password) {
+      return "Enter the password, token, or API key for this authentication type.";
+    }
+    return "";
   }
   if (payload.type === "bigquery") {
     if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(payload.config.project_id)) {

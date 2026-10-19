@@ -767,6 +767,8 @@ class AwsInspector:
                 configs[name] = self.gsheets_catalog_properties(catalog, secret_resolver)
             elif spec.kind == "cassandra":
                 configs[name] = self.cassandra_catalog_properties(catalog, secret_resolver)
+            elif spec.kind == "openapi":
+                configs[name] = self.openapi_catalog_properties(catalog, secret_resolver)
             elif spec.kind == "prometheus":
                 configs[name] = self.prometheus_catalog_properties(catalog, secret_resolver)
             elif spec.kind == "generator":
@@ -890,6 +892,44 @@ class AwsInspector:
             password = self._require_resolved_secret(catalog, secret_resolver)
             lines.append(f"prometheus.auth.user={connection_user}")
             lines.append(f"prometheus.auth.password={password}")
+        return "\n".join(lines) + "\n"
+
+    def openapi_catalog_properties(
+        self, catalog: dict[str, Any], secret_resolver: Callable[[str], str] | None
+    ) -> str:
+        config = catalog.get("config", {})
+        lines = [
+            "connector.name=openapi",
+            f"spec-location={config['spec_location']}",
+            f"base-uri={config['base_uri']}",
+        ]
+        # Credentials resolve on the signed node path only, so they never land
+        # in EC2 user-data. Specs that declare security schemes use the same
+        # properties, so they are set whatever the scheme.
+        auth_type = str(config.get("auth_type") or "none")
+        if auth_type == "basic":
+            password = self._require_resolved_secret(catalog, secret_resolver)
+            lines += [
+                "authentication.type=http",
+                "authentication.scheme=basic",
+                f"authentication.username={config['connection_user']}",
+                f"authentication.password={password}",
+            ]
+        elif auth_type == "bearer":
+            token = self._require_resolved_secret(catalog, secret_resolver)
+            lines += [
+                "authentication.type=http",
+                "authentication.scheme=bearer",
+                f"authentication.bearer-token={token}",
+            ]
+        elif auth_type == "api_key":
+            key = self._require_resolved_secret(catalog, secret_resolver)
+            lines.append("authentication.type=api_key")
+            if config.get("api_key_name"):
+                lines.append(f"authentication.api-key-name={config['api_key_name']}")
+            lines.append(f"authentication.api-key-value={key}")
+        # Read-only access is enforced by the cluster's access-control rules,
+        # since the connector has no read-only switch of its own.
         return "\n".join(lines) + "\n"
 
     def generator_catalog_properties(self, catalog: dict[str, Any]) -> str:
@@ -1078,6 +1118,22 @@ class AwsInspector:
             blocks = []
             for driver in drivers:
                 plugin_dir = str(driver["plugin_dir"])
+                if driver.get("archive_url"):
+                    # Bundled third-party plugin: a pinned release archive whose
+                    # hash is fixed in code. Verify before unpacking, then swap
+                    # the archive's root directory in as the plugin dir.
+                    archive = f"/tmp/trinohub-plugin-{plugin_dir}.zip"
+                    staging = f"/tmp/trinohub-plugin-{plugin_dir}"
+                    blocks.append(
+                        f'curl --fail --location --retry 12 --retry-delay 10 "{driver["archive_url"]}" --output "{archive}"\n'
+                        f'echo "{driver["sha256"]}  {archive}" | sha256sum -c -\n'
+                        f'rm -rf "{staging}" "/opt/trino/plugin/{plugin_dir}"\n'
+                        f'python3 -m zipfile -e "{archive}" "{staging}"\n'
+                        f'mv "{staging}/{driver["archive_root"]}" "/opt/trino/plugin/{plugin_dir}"\n'
+                        f'rm -rf "{staging}" "{archive}"\n'
+                        f'chown -R "$TRINO_USER:$TRINO_USER" "/opt/trino/plugin/{plugin_dir}"'
+                    )
+                    continue
                 filename = str(driver["filename"])
                 connector_type = str(driver["connector_type"])
                 sha256 = str(driver["sha256"])

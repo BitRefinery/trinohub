@@ -12,6 +12,21 @@ Anything landing on `main` between releases goes under **Unreleased**.
 
 ### Added
 
+- **OpenAPI catalogs: query HTTP APIs with SQL.** A new *OpenAPI (HTTP APIs)*
+  connector type uses the [trino-openapi](https://github.com/nineinchnick/trino-openapi)
+  plugin to turn every endpoint of an API with an OpenAPI spec into a table, so
+  SaaS data can be joined with warehouse tables and reached through MCP, Ask
+  Trino, and data products. Give the spec URL and API base URL (both HTTPS, both
+  through the SSRF guard) and, optionally, HTTP basic, bearer-token, or API-key
+  auth. The credential is kept in Secrets Manager and delivered only over the
+  signed node channel. Nodes download the pinned v2.0 release from GitHub and
+  check its SHA-256 before unpacking it, so there is nothing to upload. The
+  plugin runs on Trino 483 and 484, and clusters on other versions refuse the
+  catalog. New catalogs are **read only**: the connector maps `INSERT`, `UPDATE`,
+  and `DELETE` to calls that change the remote system, so the cluster's
+  access-control rules allow only `SELECT` on them unless the catalog is switched
+  to *Read and write*.
+
 - **Ask by email.** People in a role with the new `ASK_BY_EMAIL` privilege can
   email a question to an inbound address and get the answer as a threaded reply.
   Mail arrives through an SES receipt rule → SNS → SQS queue that the control
