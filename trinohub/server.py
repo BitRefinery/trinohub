@@ -3164,21 +3164,32 @@ class TrinoHubApp:
 
     def _sample_cache_hit_rate(self, coordinator_endpoint: str) -> float | None:
         """Best-effort Alluxio file-system-cache hit rate from the built-in jmx
-        catalog (attached automatically to accelerated clusters). Column names
-        vary across Trino versions, so hits/misses are matched by name."""
-        try:
-            columns, rows = self._run_trino_query_with_columns(
-                coordinator_endpoint,
-                'SELECT * FROM jmx.current."io.trino.filesystem.alluxio:*"',
-            )
-        except Exception:
+        catalog (attached automatically to accelerated clusters).
+
+        AlluxioCacheStats exposes reads served from the cache (``cachereads``)
+        and from object storage (``externalreads``) as distributions; only the
+        ``alltime`` counts are summed so the rolling windows aren't counted
+        twice. Trino 484 moved the cache into the blob-cache-alluxio plugin,
+        which renamed the MBean domain, so both domains are tried."""
+        columns: list[str] = []
+        rows: list[list[Any]] = []
+        for domain in ("io.trino.blob.cache.alluxio", "io.trino.filesystem.alluxio"):
+            try:
+                columns, rows = self._run_trino_query_with_columns(
+                    coordinator_endpoint,
+                    f'SELECT * FROM jmx.current."{domain}:*"',
+                )
+                break
+            except Exception:
+                continue
+        else:
             return None
         hits = misses = 0.0
         found = False
         for index, column in enumerate(columns):
             name = str(column).lower()
-            is_hit = "hit" in name and "count" in name
-            is_miss = "miss" in name and "count" in name
+            is_hit = name == "cachereads.alltime.count"
+            is_miss = name == "externalreads.alltime.count"
             if not (is_hit or is_miss):
                 continue
             for row in rows:
