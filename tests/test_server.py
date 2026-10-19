@@ -6283,9 +6283,12 @@ class AcceleratedClusterTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _glue_cluster(self, *, accelerated, instance_type="i4i.2xlarge", catalog_types=("s3_glue",)):
+    def _glue_cluster(
+        self, *, accelerated, instance_type="i4i.2xlarge", catalog_types=("s3_glue",), trino_version="482"
+    ):
         """A cluster dict shaped like node_config_script's input, with one
-        Glue-family catalog per requested type (named lake0, lake1, ...)."""
+        Glue-family catalog per requested type (named lake0, lake1, ...).
+        Pinned to 482 by default: the per-catalog cache layout predates 484."""
         catalog_configs = [
             {
                 "name": f"lake{index}",
@@ -6304,6 +6307,7 @@ class AcceleratedClusterTests(unittest.TestCase):
         return {
             "name": "cache-cluster",
             "accelerated": accelerated,
+            "trino_version": trino_version,
             "catalogs": ["system", "tpch"] + [c["name"] for c in catalog_configs],
             "catalog_configs": catalog_configs,
         }
@@ -6504,6 +6508,7 @@ class AcceleratedClusterTests(unittest.TestCase):
                 "worker_mode": "fixed",
                 "accelerated": True,
                 "catalogs": ["system", "lake"],
+                "trino_version": "482",
             },
             self.admin,
         )["cluster"]
@@ -6515,6 +6520,74 @@ class AcceleratedClusterTests(unittest.TestCase):
         self.assertIn("fs.cache.enabled=true", script)
         self.assertIn("fs.cache.directories=/mnt/trino-cache/disk0/lake", script)
         self.assertIn("fs.cache.max-disk-usage-percentages=90", script)
+
+    def test_node_config_renders_shared_cache_manager_from_484(self):
+        aws = AwsInspector(region="us-east-2")
+        script = aws.trino_node_config_script(
+            cluster=self._glue_cluster(
+                accelerated=True, catalog_types=("s3_glue", "delta_glue"), trino_version="484"
+            ),
+            node_role="worker",
+            region="us-east-2",
+            instance_type="i3en.2xlarge",
+            coordinator_uri="http://10.0.1.10:8080",
+        )
+        # Trino 484 rejects fs.cache.directories in catalog files: both catalogs
+        # only opt in, and one cache manager owns the disks and the whole budget.
+        self.assertEqual(script.count("fs.cache.enabled=true"), 2)
+        self.assertIn("cache-manager.config-files=/etc/trino/cache-manager-alluxio.properties", script)
+        self.assertIn("cat >/etc/trino/cache-manager-alluxio.properties <<'EOF'", script)
+        self.assertIn("cache-manager.name=alluxio", script)
+        self.assertEqual(
+            script.count("fs.cache.directories=/mnt/trino-cache/disk0/alluxio,/mnt/trino-cache/disk1/alluxio"),
+            1,
+        )
+        self.assertIn("fs.cache.max-disk-usage-percentages=90,90", script)
+        self.assertNotIn("/mnt/trino-cache/disk0/lake0", script)
+        self.assertIn('"/mnt/trino-cache/disk0/alluxio" "/mnt/trino-cache/disk1/alluxio"', script)
+
+    def test_node_config_has_no_cache_manager_without_cached_catalogs(self):
+        aws = AwsInspector(region="us-east-2")
+        script = aws.trino_node_config_script(
+            cluster=self._glue_cluster(accelerated=True, catalog_types=("hudi_glue",), trino_version="484"),
+            node_role="worker",
+            region="us-east-2",
+            instance_type="i4i.2xlarge",
+            coordinator_uri="http://10.0.1.10:8080",
+        )
+        self.assertNotIn("cache-manager", script)
+        self.assertNotIn("mkfs.xfs", script)
+
+    def test_cache_hit_rate_reads_alltime_counts_from_484_mbean(self):
+        queries = []
+
+        def fake_query(endpoint, sql_text):
+            queries.append(sql_text)
+            # Column names as reported by Trino 484's jmx catalog; the rolling
+            # windows must not be added to the all-time totals.
+            return (
+                ["node", "object_name", "cachereads.alltime.count", "cachereads.oneminute.count",
+                 "externalreads.alltime.count", "externalreads.oneminute.count"],
+                [["n1", "lake", 30.0, 30.0, 10.0, 10.0], ["n2", "lake", 50.0, 0.0, 10.0, 0.0]],
+            )
+
+        with unittest.mock.patch.object(self.app, "_run_trino_query_with_columns", side_effect=fake_query):
+            self.assertEqual(self.app._sample_cache_hit_rate("http://coordinator:8080"), 0.8)
+        self.assertEqual(queries, ['SELECT * FROM jmx.current."io.trino.blob.cache.alluxio:*"'])
+
+    def test_cache_hit_rate_falls_back_to_pre_484_mbean(self):
+        queries = []
+
+        def fake_query(endpoint, sql_text):
+            queries.append(sql_text)
+            if "io.trino.blob.cache.alluxio" in sql_text:
+                raise ApiError(502, "Table does not exist")
+            return (["cachereads.alltime.count", "externalreads.alltime.count"], [[1.0, 3.0]])
+
+        with unittest.mock.patch.object(self.app, "_run_trino_query_with_columns", side_effect=fake_query):
+            self.assertEqual(self.app._sample_cache_hit_rate("http://coordinator:8080"), 0.25)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("io.trino.filesystem.alluxio", queries[1])
 
 
 if __name__ == "__main__":

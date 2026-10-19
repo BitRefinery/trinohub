@@ -23,7 +23,7 @@ IMDS_BASE = "http://169.254.169.254/latest"
 # The control plane normally *discovers* newer releases live from Maven Central
 # (see fetch_published_trino_versions); this list keeps air-gapped or offline
 # deployments working and pins the floor of what discovery will offer.
-SUPPORTED_TRINO_VERSIONS = ["482", "481", "480", "479"]
+SUPPORTED_TRINO_VERSIONS = ["484", "483", "482", "481", "480", "479"]
 TRINO_VERSION = SUPPORTED_TRINO_VERSIONS[0]
 TRINO_HTTP_PORT = 8080
 # Access-control rules reach a running cluster in at most the sum of these:
@@ -61,6 +61,15 @@ def fetch_published_trino_versions(timeout_seconds: float = 5.0) -> list[str]:
     }
     offered = sorted((v for v in published if v >= MIN_OFFERED_TRINO_VERSION), reverse=True)
     return [str(v) for v in offered[:MAX_OFFERED_TRINO_VERSIONS]]
+
+
+def trino_version_number(trino_version: str | None) -> int:
+    """A Trino version as an integer for feature gates, defaulting to the
+    current default version when it is missing or malformed."""
+    try:
+        return int(trino_version or TRINO_VERSION)
+    except (TypeError, ValueError):
+        return int(TRINO_VERSION)
 
 
 def resolve_trino_version(cluster: dict[str, Any]) -> str:
@@ -120,6 +129,12 @@ INSTANCE_STORE_CACHE_BUDGET_PCT = 90
 # Instance-store devices are mounted here by the node bootstrap, one
 # subdirectory per disk (disk0, disk1, ...), then one per catalog below that.
 TRINO_CACHE_MOUNT_ROOT = "/mnt/trino-cache"
+# Trino 484 moved the file system cache into a cluster-wide cache manager: the
+# directories and size limits live in one properties file named by
+# cache-manager.config-files, every cached catalog shares them, and catalogs
+# only set fs.cache.enabled. Older releases configure the cache per catalog.
+SHARED_CACHE_MANAGER_MIN_VERSION = 484
+TRINO_CACHE_MANAGER_FILE = "/etc/trino/cache-manager-alluxio.properties"
 
 
 def instance_store_disks(instance_type: str) -> int:
@@ -660,19 +675,24 @@ class AwsInspector:
         catalogs: list[str],
         catalog_configs: list[dict[str, Any]] | None,
         cache_disks: int,
+        trino_version: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Per-catalog fs.cache.* layout for an accelerated cluster.
 
-        Each cacheable catalog gets its own directory on every instance-store
-        disk (upstream requires distinct directories per catalog), and the
-        disk-usage budget is split evenly across the cached catalogs so their
-        combined caches never fill the disk.
+        Before Trino 484, each cacheable catalog gets its own directory on every
+        instance-store disk (upstream requires distinct directories per catalog),
+        and the disk-usage budget is split evenly across the cached catalogs so
+        their combined caches never fill the disk. From 484 the catalogs share
+        the cache manager's directories (see ``fs_cache_manager_properties``),
+        so each layout carries no directories of its own.
         """
         if cache_disks < 1:
             return {}
         cached = self.fs_cache_catalog_names(catalogs, catalog_configs)
         if not cached:
             return {}
+        if trino_version_number(trino_version) >= SHARED_CACHE_MANAGER_MIN_VERSION:
+            return {name: {"directories": [], "usage_pct": None} for name in cached}
         usage_pct = max(1, INSTANCE_STORE_CACHE_BUDGET_PCT // len(cached))
         return {
             name: {
@@ -684,6 +704,22 @@ class AwsInspector:
             for name in cached
         }
 
+    def fs_cache_manager_directories(self, cache_disks: int) -> list[str]:
+        """Shared cache directories of the Trino 484+ cache manager, one per
+        instance-store disk."""
+        return [f"{TRINO_CACHE_MOUNT_ROOT}/disk{disk}/alluxio" for disk in range(cache_disks)]
+
+    def fs_cache_manager_properties(self, cache_disks: int) -> str:
+        """The Trino 484+ alluxio cache manager file. Every cached catalog
+        shares these directories, so the whole disk budget applies once."""
+        directories = self.fs_cache_manager_directories(cache_disks)
+        usage = str(INSTANCE_STORE_CACHE_BUDGET_PCT)
+        return (
+            "cache-manager.name=alluxio\n"
+            f"fs.cache.directories={','.join(directories)}\n"
+            f"fs.cache.max-disk-usage-percentages={','.join([usage] * len(directories))}\n"
+        )
+
     def catalog_config_files(
         self,
         catalogs: list[str],
@@ -693,7 +729,7 @@ class AwsInspector:
         trino_version: str | None = None,
     ) -> dict[str, str]:
         configs = {}
-        cache_layout = self.fs_cache_layout(catalogs, catalog_configs, cache_disks)
+        cache_layout = self.fs_cache_layout(catalogs, catalog_configs, cache_disks, trino_version)
         if cache_layout:
             # Accelerated clusters carry the built-in jmx connector so the
             # control plane can sample AlluxioCacheStats hit/miss metrics.
@@ -916,10 +952,7 @@ class AwsInspector:
             f"hive.metastore.glue.region={glue_region}",
             f"hive.metastore.glue.default-warehouse-dir={warehouse}",
         ]
-        try:
-            version_number = int(trino_version or TRINO_VERSION)
-        except (TypeError, ValueError):
-            version_number = int(TRINO_VERSION)
+        version_number = trino_version_number(trino_version)
         # Trino 481 shortened fs.native-<cloud>.enabled to fs.<cloud>.enabled.
         def fs_enabled_property(cloud: str) -> str:
             return f"fs.{cloud}.enabled" if version_number >= 481 else f"fs.native-{cloud}.enabled"
@@ -956,13 +989,16 @@ class AwsInspector:
         if fs_cache:
             # Accelerated cluster: cache hot S3 pages on the node-local NVMe
             # disks mounted by the bootstrap script. One value per directory.
+            # Trino 484+ layouts have no directories: the shared cache manager
+            # owns them and the catalog only opts in.
+            lines.append("fs.cache.enabled=true")
             directories = list(fs_cache["directories"])
-            usage = str(fs_cache["usage_pct"])
-            lines += [
-                "fs.cache.enabled=true",
-                f"fs.cache.directories={','.join(directories)}",
-                f"fs.cache.max-disk-usage-percentages={','.join([usage] * len(directories))}",
-            ]
+            if directories:
+                usage = str(fs_cache["usage_pct"])
+                lines += [
+                    f"fs.cache.directories={','.join(directories)}",
+                    f"fs.cache.max-disk-usage-percentages={','.join([usage] * len(directories))}",
+                ]
         return "\n".join(lines) + "\n"
 
     def default_key_name(self, region: str) -> str | None:
@@ -1015,7 +1051,12 @@ class AwsInspector:
         coordinator_flag = "true" if node_role == "coordinator" else "false"
         accelerated = bool(cluster.get("accelerated"))
         cache_disks = instance_store_disks(instance_type or "") if accelerated else 0
-        cache_layout = self.fs_cache_layout(catalogs, cluster.get("catalog_configs", []), cache_disks)
+        cache_layout = self.fs_cache_layout(
+            catalogs, cluster.get("catalog_configs", []), cache_disks, trino_version
+        )
+        shared_cache_manager = bool(cache_layout) and (
+            trino_version_number(trino_version) >= SHARED_CACHE_MANAGER_MIN_VERSION
+        )
         catalog_files = self.catalog_config_files(
             catalogs,
             cluster.get("catalog_configs", []),
@@ -1056,12 +1097,16 @@ class AwsInspector:
         # Instance store attaches empty on every boot, so this always reformats and
         # the cache starts cold after a suspend/resume cycle.
         cache_commands = ""
+        cache_manager_properties = ""
         if cache_layout:
-            cache_directories = " ".join(
-                f'"{directory}"'
-                for layout in cache_layout.values()
-                for directory in layout["directories"]
-            )
+            if shared_cache_manager:
+                directories = self.fs_cache_manager_directories(cache_disks)
+                cache_manager_properties = f"\ncache-manager.config-files={TRINO_CACHE_MANAGER_FILE}"
+            else:
+                directories = [
+                    directory for layout in cache_layout.values() for directory in layout["directories"]
+                ]
+            cache_directories = " ".join(f'"{directory}"' for directory in directories)
             cache_commands = f"""CACHE_ROOT="{TRINO_CACHE_MOUNT_ROOT}"
 declare -A TRINOHUB_SEEN_CACHE_DEVICES
 cache_disk_index=0
@@ -1086,6 +1131,11 @@ for cache_directory in {cache_directories}; do
 done
 chown -R "$TRINO_USER:$TRINO_USER" "$CACHE_ROOT"
 """
+            if shared_cache_manager:
+                cache_commands += (
+                    f"cat >{TRINO_CACHE_MANAGER_FILE} <<'EOF'\n"
+                    f"{self.fs_cache_manager_properties(cache_disks)}EOF\n"
+                )
         # Fine-grained data policies: render Trino's file-based system access
         # control. Absent rules, no files are written and the engine stays
         # open (control-plane grants still gate the API).
@@ -1203,7 +1253,7 @@ http-server.process-forwarded=true
 discovery.uri={discovery_uri}
 query.max-memory={memory["query_max_memory_gb"]}GB
 query.max-memory-per-node={memory["query_max_memory_per_node_gb"]}GB
-memory.heap-headroom-per-node={memory["heap_headroom_gb"]}GB
+memory.heap-headroom-per-node={memory["heap_headroom_gb"]}GB{cache_manager_properties}
 EOF
 
 # The system catalog is built into Trino and is automatically available as "system".

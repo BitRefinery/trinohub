@@ -58,9 +58,26 @@ Anything landing on `main` between releases goes under **Unreleased**.
   control (allow-all when no policies exist), because Trino only loads that
   setting at startup. Clusters started before this change pick it up on their
   next start.
+- **Trino 484 is the default version, and 483 and 484 are in the offline
+  fallback list.** The create-cluster picker already offered both through
+  release discovery; the static list only matters when discovery is offline.
 
 ### Fixed
 
+- **Accelerated clusters start on Trino 484.** Trino 484 moved the file system
+  cache to a cluster-wide cache manager and rejects `fs.cache.directories` in
+  catalog files, which is where TrinoHub put them, so accelerated clusters on 484
+  did not start. From 484 each node writes one
+  `/etc/trino/cache-manager-alluxio.properties` covering all instance-store
+  disks, `config.properties` points at it, and cached catalogs only set
+  `fs.cache.enabled=true`. Clusters on older versions keep the per-catalog
+  layout. Accelerated 484 clusters that failed to start work on their next
+  start.
+- **The cache hit rate on cluster stats is filled in.** The sampler looked for
+  column names containing `hit`/`miss`, but Trino reports cache reads as
+  `cachereads` and `externalreads`, so the hit rate was always empty. It now
+  divides the all-time `cachereads` count by all reads, and also reads the
+  MBean domain Trino 484 moved the cache stats to.
 - **Importing `trinohub.api` no longer opens the database.** `app = create_app()`
   ran at module scope, so importing the module for its helpers — which the test
   suite does — constructed a full application against `TRINOHUB_DB`, creating
