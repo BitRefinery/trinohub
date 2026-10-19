@@ -37,6 +37,8 @@ from .tls_gateway import SHIM_UPSTREAM, build_caddyfile, push_config
 from .connectors import (
     CREDENTIALED_CATALOG_TYPES,
     DRIVER_REQUIRED_TYPES,
+    OPENAPI_AUTH_TYPES,
+    OPENAPI_URL,
     OPTIONAL_SECRET_CATALOG_TYPES,
     REGISTRY,
     ConnectorType,
@@ -141,6 +143,8 @@ ADLS_WAREHOUSE_PATTERN = re.compile(
 )
 SCHEMA_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 JDBC_USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,127}")
+# HTTP header / query parameter name for an OpenAPI API key.
+OPENAPI_API_KEY_NAME_PATTERN = re.compile(r"[A-Za-z0-9_.\-]{1,128}")
 # Hostname or IP literal for non-URL connectors (e.g. Elasticsearch host field).
 HOST_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,253}")
 # GCP project IDs: 6-30 chars, lowercase letter start, letters/digits/hyphens,
@@ -3850,8 +3854,14 @@ class TrinoHubApp:
         catch-all allow. Catalog visibility mirrors the Phase 1 role grants so
         wire-protocol clients get the same catalog gate as the API. Tag
         policies append column deny/mask entries for tagged columns.
+
+        Catalogs whose connector has no read-only switch of its own (OpenAPI)
+        are made read-only here: everyone gets at most SELECT on them, so rules
+        are rendered for them even when no policies exist.
         """
         with self.conn() as conn:
+            read_only_regex = self._read_only_catalog_regex(conn, cluster.get("catalogs") or [])
+            all_privileges = list(DATA_POLICY_PRIVILEGES) + ["OWNERSHIP"]
             policies = conn.execute("SELECT * FROM data_policies ORDER BY id").fetchall()
             tag_rows = conn.execute(
                 """
@@ -3861,7 +3871,20 @@ class TrinoHubApp:
                 """
             ).fetchall()
             if not policies and not tag_rows:
-                return None
+                if read_only_regex is None:
+                    return None
+                # No catalog or schema sections: every catalog stays visible and
+                # only table privileges change.
+                return json.dumps(
+                    {
+                        "tables": [
+                            {"catalog": read_only_regex, "privileges": ["SELECT"]},
+                            {"privileges": all_privileges},
+                        ]
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
 
             table_rules: list[dict[str, Any]] = []
             restricted_regexes: list[str] = []
@@ -3891,6 +3914,8 @@ class TrinoHubApp:
                 if policy["table"]:
                     rule["table"] = re.escape(policy["table"])
                 rule["privileges"] = policy["privileges"]
+                if read_only_regex is not None and re.fullmatch(read_only_regex, policy["catalog"]):
+                    rule["privileges"] = [p for p in policy["privileges"] if p == "SELECT"]
                 entries = column_entries(policy)
                 if policy["allowed_columns"]:
                     # Allow-list semantics: Trino's file rules are deny-based
@@ -3934,15 +3959,12 @@ class TrinoHubApp:
 
             # Users restricted by policies get nothing beyond their rules; every
             # other user falls through to full access.
+            unrestricted: dict[str, Any] = {}
             if restricted_regexes:
-                table_rules.append(
-                    {
-                        "user": "(?!" + "|".join(f"{regex}$" for regex in restricted_regexes) + ").*",
-                        "privileges": list(DATA_POLICY_PRIVILEGES) + ["OWNERSHIP"],
-                    }
-                )
-            else:
-                table_rules.append({"privileges": list(DATA_POLICY_PRIVILEGES) + ["OWNERSHIP"]})
+                unrestricted["user"] = "(?!" + "|".join(f"{regex}$" for regex in restricted_regexes) + ").*"
+            if read_only_regex is not None:
+                table_rules.append({**unrestricted, "catalog": read_only_regex, "privileges": ["SELECT"]})
+            table_rules.append({**unrestricted, "privileges": all_privileges})
 
             # Catalog visibility mirrors the Phase 1 role grants so wire
             # clients can't browse catalogs the API would refuse.
@@ -3970,6 +3992,22 @@ class TrinoHubApp:
             "tables": table_rules,
         }
         return json.dumps(rules, indent=2, sort_keys=True)
+
+    def _read_only_catalog_regex(self, conn: sqlite3.Connection, catalog_names: list[str]) -> str | None:
+        """Regex of attached, enabled catalogs that rely on access-control rules
+        for read-only mode, or None when there are none."""
+        custom = [name for name in catalog_names if name not in BUILT_IN_CATALOG_NAMES]
+        names = sorted(
+            name
+            for name, row in self.catalog_rows_by_name(conn, custom).items()
+            if bool(row["enabled"])
+            and (spec := REGISTRY.get(row["type"])) is not None
+            and spec.kind == "openapi"
+            and loads(row["config_json"], {}).get("access_mode", "read_only") == "read_only"
+        )
+        if not names:
+            return None
+        return "(" + "|".join(re.escape(name) for name in names) + ")"
 
     def _cached_column_names(
         self, conn: sqlite3.Connection, catalog: str, schema_name: str, table_name: str
@@ -5670,7 +5708,7 @@ class TrinoHubApp:
         catalogs = self.normalize_catalogs(payload.get("catalogs") or ["system", "tpch", "tpcds"])
         now = utc_now()
         with self.conn() as conn:
-            self.require_known_catalogs(conn, catalogs)
+            self.require_plugin_trino_version(self.catalog_configs_for_cluster(conn, catalogs), trino_version)
             cursor = conn.execute(
                 """
                 INSERT INTO clusters
@@ -5838,7 +5876,9 @@ class TrinoHubApp:
         # Validate referenced catalogs exist before mutating anything.
         if "catalogs" in changed:
             with self.conn() as conn:
-                self.require_known_catalogs(conn, catalogs)
+                self.require_plugin_trino_version(
+                    self.catalog_configs_for_cluster(conn, catalogs), current["trino_version"]
+                )
 
         asg_fields = sorted({"worker_mode", "min_workers", "max_workers"} & set(changed))
         is_running = current["status"] == "Running"
@@ -6013,8 +6053,10 @@ class TrinoHubApp:
                 raise ApiError(409, f"Cluster cannot be started while status is {cluster['status']}.")
             cluster["catalog_configs"] = self.catalog_configs_for_cluster(conn, cluster["catalogs"])
             # Fail fast if an attached connector needs a driver JAR that hasn't
-            # been uploaded, rather than letting nodes fail to boot Trino.
+            # been uploaded, or a plugin this Trino version can't load, rather
+            # than letting nodes fail to boot Trino.
             self.catalog_driver_descriptors(conn, cluster["catalog_configs"])
+            self.require_plugin_trino_version(cluster["catalog_configs"], cluster["trino_version"])
             now = utc_now()
             # Atomically claim the start: only one caller can flip this exact status
             # to Creating, so several resume triggers racing on the same cluster —
@@ -7397,7 +7439,7 @@ class TrinoHubApp:
                 config["password_secret_ref"] = self.store_catalog_password(
                     name, catalog_type, payload.get("password")
                 )
-            elif catalog_type in OPTIONAL_SECRET_CATALOG_TYPES and config.get("connection_user"):
+            elif catalog_type in OPTIONAL_SECRET_CATALOG_TYPES and self.optional_secret_in_use(config):
                 # Optional auth: a username was supplied, so a password is required
                 # and stored. Without a username the catalog is unauthenticated and
                 # keeps no secret.
@@ -7515,7 +7557,7 @@ class TrinoHubApp:
                     config["password_secret_ref"] = old_ref
                 else:
                     raise ApiError(400, f"{catalog_type} catalogs require a password.")
-            elif catalog_type in OPTIONAL_SECRET_CATALOG_TYPES and config.get("connection_user"):
+            elif catalog_type in OPTIONAL_SECRET_CATALOG_TYPES and self.optional_secret_in_use(config):
                 # Optional auth with a username set: reuse the stored secret unless a
                 # new password was supplied. Dropping the username (handled below via
                 # the unreferenced-secret cleanup) removes the credential entirely.
@@ -7525,7 +7567,7 @@ class TrinoHubApp:
                 elif old_ref:
                     config["password_secret_ref"] = old_ref
                 else:
-                    raise ApiError(400, f"{catalog_type} catalogs with a connection_user require a password.")
+                    raise ApiError(400, f"{catalog_type} catalogs with authentication require a password.")
             # Clean up a credential that is no longer referenced (type changed away,
             # or the secret moved under a renamed catalog).
             new_ref = config.get("password_secret_ref")
@@ -7690,6 +7732,18 @@ class TrinoHubApp:
         for catalog in catalog_configs:
             catalog_type = catalog.get("type")
             spec = REGISTRY.get(catalog_type)
+            if spec and spec.bundled_plugin and catalog_type not in seen:
+                seen.add(catalog_type)
+                descriptors.append(
+                    {
+                        "connector_type": catalog_type,
+                        "plugin_dir": spec.plugin_dir or catalog_type,
+                        "archive_url": spec.bundled_plugin.url,
+                        "archive_root": spec.bundled_plugin.archive_root,
+                        "sha256": spec.bundled_plugin.sha256,
+                    }
+                )
+                continue
             if not spec or not spec.requires_driver or catalog_type in seen:
                 continue
             seen.add(catalog_type)
@@ -7712,6 +7766,24 @@ class TrinoHubApp:
             )
         return descriptors
 
+    def require_plugin_trino_version(
+        self, catalog_configs: list[dict[str, Any]], trino_version: str
+    ) -> None:
+        """Refuse a cluster whose Trino version can't load an attached catalog's
+        bundled plugin: plugins are built against one connector SPI, and a
+        mismatch fails when Trino loads the plugin, so the cluster never starts."""
+        for catalog in catalog_configs:
+            spec = REGISTRY.get(catalog.get("type"))
+            if not spec or not spec.bundled_plugin:
+                continue
+            supported = spec.bundled_plugin.trino_versions
+            if trino_version not in supported:
+                raise ApiError(
+                    400,
+                    f"Catalog '{catalog.get('name')}' uses the {spec.label} connector, which runs on "
+                    f"Trino {' or '.join(supported)}; this cluster uses Trino {trino_version}.",
+                )
+
     def normalize_catalog_config(self, catalog_type: str, raw_config: Any) -> dict[str, Any]:
         spec = REGISTRY.get(catalog_type)
         if spec is None:
@@ -7731,6 +7803,8 @@ class TrinoHubApp:
             return self.normalize_cassandra_catalog_config(spec, raw_config)
         if spec.kind == "prometheus":
             return self.normalize_prometheus_catalog_config(spec, raw_config)
+        if spec.kind == "openapi":
+            return self.normalize_openapi_catalog_config(spec, raw_config)
         if spec.kind == "generator":
             return self.normalize_generator_catalog_config(spec, raw_config)
         raise ApiError(400, f"Unsupported catalog type: {catalog_type}.")
@@ -7748,6 +7822,9 @@ class TrinoHubApp:
             self.validate_gcp_service_account_key(password)
         elif credential_kind == "azure_storage_key" and ("\r" in password or "\n" in password):
             raise ApiError(400, "Azure storage account key must be a single-line value.")
+        elif spec and spec.kind == "openapi" and ("\r" in password or "\n" in password):
+            # Rendered into a line-oriented .properties file.
+            raise ApiError(400, "The password, token, or API key must be a single-line value.")
         try:
             return self.secret_store.put(name, password)
         except SecretStoreError as exc:
@@ -7883,6 +7960,56 @@ class TrinoHubApp:
             if not JDBC_USER_PATTERN.fullmatch(connection_user):
                 raise ApiError(400, "connection_user must be a valid username.")
             config["connection_user"] = connection_user
+        return config
+
+    @staticmethod
+    def optional_secret_in_use(config: dict[str, Any]) -> bool:
+        """Whether an optional-auth catalog's config turns authentication on, so
+        a credential must be stored: a connection user for Cassandra and
+        Prometheus, any auth_type but "none" for OpenAPI."""
+        if "auth_type" in config:
+            return config["auth_type"] != "none"
+        return bool(config.get("connection_user"))
+
+    def normalize_openapi_catalog_config(self, spec: ConnectorType, raw_config: Any) -> dict[str, Any]:
+        # OpenAPI: the coordinator fetches the spec when the catalog loads, and
+        # every query calls the API, so both URLs pass the SSRF guard and must be
+        # HTTPS. The password, token, or API key goes through the secret path.
+        if not isinstance(raw_config, dict):
+            raise ApiError(400, "catalog config must be an object.")
+        for key in raw_config:
+            lowered = str(key).lower()
+            if "secret" in lowered or "password" in lowered or "token" in lowered or "access_key" in lowered:
+                raise ApiError(400, "Do not store passwords or secrets in catalog config; use the password field.")
+        config: dict[str, Any] = {"connector_name": spec.connector_name}
+        for field, label in (("spec_location", "spec_location"), ("base_uri", "base_uri")):
+            value = str(raw_config.get(field) or "").strip()
+            match = OPENAPI_URL.fullmatch(value)
+            if not match:
+                raise ApiError(400, f"{label} must be an https:// URL without credentials.")
+            self.reject_ssrf_host(match.group(1))
+            config[field] = value
+        auth_type = str(raw_config.get("auth_type") or "none").strip()
+        if auth_type not in OPENAPI_AUTH_TYPES:
+            raise ApiError(400, f"auth_type must be one of: {', '.join(OPENAPI_AUTH_TYPES)}.")
+        config["auth_type"] = auth_type
+        if auth_type == "basic":
+            connection_user = str(raw_config.get("connection_user") or "").strip()
+            if not JDBC_USER_PATTERN.fullmatch(connection_user):
+                raise ApiError(400, "connection_user is required for basic auth and must be a valid username.")
+            config["connection_user"] = connection_user
+        if auth_type == "api_key":
+            api_key_name = str(raw_config.get("api_key_name") or "").strip()
+            if api_key_name:
+                if not OPENAPI_API_KEY_NAME_PATTERN.fullmatch(api_key_name):
+                    raise ApiError(400, "api_key_name must be a header or parameter name.")
+                config["api_key_name"] = api_key_name
+        # Read-only by default: the connector maps INSERT, UPDATE, and DELETE to
+        # API calls that change the remote system.
+        access_mode = str(raw_config.get("access_mode") or "read_only").strip()
+        if access_mode not in {"read_write", "read_only"}:
+            raise ApiError(400, "access_mode must be read_write or read_only.")
+        config["access_mode"] = access_mode
         return config
 
     def normalize_generator_catalog_config(self, spec: ConnectorType, raw_config: Any) -> dict[str, Any]:

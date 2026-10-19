@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trinohub.aws_checks import TRINO_HTTP_PORT, TRINO_VERSION, AwsInspector
-from trinohub.server import ApiError, TrinoHubApp
+from trinohub.connectors import OPENAPI_PLUGIN, connector_types_catalog
+from trinohub.server import DATA_POLICY_PRIVILEGES, ApiError, TrinoHubApp
 
 
 # A pre-RBAC admin record: user_privileges falls back to the legacy role column
@@ -6588,6 +6589,203 @@ class AcceleratedClusterTests(unittest.TestCase):
             self.assertEqual(self.app._sample_cache_hit_rate("http://coordinator:8080"), 0.25)
         self.assertEqual(len(queries), 2)
         self.assertIn("io.trino.filesystem.alluxio", queries[1])
+
+
+
+class OpenApiConnectorTests(unittest.TestCase):
+    """OpenAPI catalogs: HTTP APIs through the pinned trino-openapi plugin."""
+
+    SPEC = "https://api.example.com/openapi.json"
+    BASE = "https://api.example.com/v1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = TrinoHubApp(
+            db_path=Path(self.tmp.name) / "test.sqlite3", aws=FakeAws(), require_setup_token=False
+        )
+        self.app.complete_setup(
+            {
+                "username": "admin",
+                "password": "correct-horse-password",
+                "allowed_instance_types": ["r7i.2xlarge"],
+            }
+        )
+        self.app.secret_store = FakeSecretStore()
+        with self.app.conn() as conn:
+            self.admin = dict(conn.execute("SELECT * FROM users WHERE username = 'admin'").fetchone())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _catalog(self, name="api", password=None, **config):
+        payload = {
+            "name": name,
+            "type": "openapi",
+            "config": {"spec_location": self.SPEC, "base_uri": self.BASE, **config},
+        }
+        if password is not None:
+            payload["password"] = password
+        return self.app.create_catalog(payload)["catalog"]
+
+    def _cluster(self, catalogs, trino_version="483"):
+        return self.app.create_cluster(
+            {"name": "apis", "instance_type": "r7i.2xlarge", "trino_version": trino_version, "catalogs": catalogs},
+            self.admin,
+        )["cluster"]
+
+    def test_defaults_to_read_only_without_auth(self):
+        created = self._catalog()
+        self.assertEqual(created["config"]["auth_type"], "none")
+        self.assertEqual(created["config"]["access_mode"], "read_only")
+        self.assertNotIn("password_secret_ref", created["config"])
+        props = AwsInspector(region="us-east-2").openapi_catalog_properties(created, None)
+        self.assertEqual(
+            props,
+            f"connector.name=openapi\nspec-location={self.SPEC}\nbase-uri={self.BASE}\n",
+        )
+
+    def test_rejects_unsafe_urls_and_bad_auth(self):
+        bad_configs = [
+            {"spec_location": "http://api.example.com/openapi.json"},
+            {"spec_location": "file:///etc/passwd"},
+            {"base_uri": "https://169.254.169.254/latest"},
+            {"base_uri": "https://localhost/v1"},
+            {"base_uri": "https://user:pw@api.example.com/v1"},
+            {"auth_type": "oauth"},
+            {"auth_type": "basic"},
+            {"access_mode": "sometimes"},
+            {"bearer_token": "inline"},
+        ]
+        for bad in bad_configs:
+            with self.subTest(config=bad):
+                with self.assertRaises(ApiError) as context:
+                    self._catalog(**bad)
+                self.assertEqual(context.exception.status, 400)
+
+    def test_authenticated_catalog_requires_single_line_credential(self):
+        with self.assertRaises(ApiError):
+            self._catalog(auth_type="bearer")
+        with self.assertRaises(ApiError):
+            self._catalog(auth_type="bearer", password="abc\nconnector.name=memory")
+        created = self._catalog(auth_type="bearer", password="tok-123")
+        self.assertTrue(created["config"]["password_secret_ref"])
+
+    def test_renders_each_auth_type_on_signed_path_only(self):
+        aws = AwsInspector(region="us-east-2")
+        resolve = lambda ref: "resolved-secret"  # noqa: E731
+        basic = self._catalog("api_basic", auth_type="basic", connection_user="svc", password="pw")
+        props = aws.openapi_catalog_properties(basic, resolve)
+        self.assertIn("authentication.type=http\nauthentication.scheme=basic\n", props)
+        self.assertIn("authentication.username=svc\nauthentication.password=resolved-secret", props)
+        bearer = self._catalog("api_bearer", auth_type="bearer", password="tok")
+        self.assertIn("authentication.bearer-token=resolved-secret", aws.openapi_catalog_properties(bearer, resolve))
+        key = self._catalog("api_key", auth_type="api_key", api_key_name="X-API-Key", password="k")
+        props = aws.openapi_catalog_properties(key, resolve)
+        self.assertIn("authentication.type=api_key\nauthentication.api-key-name=X-API-Key\n", props)
+        self.assertIn("authentication.api-key-value=resolved-secret", props)
+        with self.assertRaises(RuntimeError):
+            aws.openapi_catalog_properties(bearer, None)
+
+    def test_switching_auth_off_deletes_the_stored_credential(self):
+        created = self._catalog(auth_type="bearer", password="tok")
+        old_ref = created["config"]["password_secret_ref"]
+        updated = self.app.update_catalog(
+            created["id"], {"config": {"spec_location": self.SPEC, "base_uri": self.BASE}}
+        )["catalog"]
+        self.assertNotIn("password_secret_ref", updated["config"])
+        self.assertIn(old_ref, self.app.secret_store.deleted)
+
+    def test_cluster_must_run_a_trino_version_the_plugin_supports(self):
+        self._catalog()
+        with self.assertRaises(ApiError) as context:
+            self._cluster(["system", "api"], trino_version="482")
+        self.assertIn("Trino 483 or 484", context.exception.message)
+        cluster = self._cluster(["system", "api"], trino_version="483")
+        self.assertIn("api", cluster["catalogs"])
+
+    def test_attaching_to_an_unsupported_cluster_is_refused(self):
+        self._catalog()
+        cluster = self.app.create_cluster(
+            {"name": "old", "instance_type": "r7i.2xlarge", "trino_version": "482", "catalogs": ["system"]},
+            self.admin,
+        )["cluster"]
+        with self.assertRaises(ApiError):
+            self.app.update_cluster(cluster["id"], {"catalogs": ["system", "api"]})
+
+    def test_node_config_installs_pinned_plugin(self):
+        created = self._catalog()
+        with self.app.conn() as conn:
+            drivers = self.app.catalog_driver_descriptors(conn, [dict(created, enabled=True)])
+        self.assertEqual(len(drivers), 1)
+        self.assertEqual(drivers[0]["sha256"], OPENAPI_PLUGIN.sha256)
+        script = AwsInspector(region="us-east-2").trino_node_config_script(
+            cluster={
+                "name": "apis",
+                "trino_version": "483",
+                "catalogs": ["system", "api"],
+                "catalog_configs": [dict(created, enabled=True)],
+            },
+            node_role="coordinator",
+            region="us-east-2",
+            drivers=drivers,
+            control_plane_uri="https://hub.example.com",
+            cluster_id=1,
+            bootstrap_token="token",
+        )
+        self.assertIn(f'"{OPENAPI_PLUGIN.url}" --output "/tmp/trinohub-plugin-openapi.zip"', script)
+        self.assertIn(f'echo "{OPENAPI_PLUGIN.sha256}  /tmp/trinohub-plugin-openapi.zip" | sha256sum -c -', script)
+        self.assertIn('python3 -m zipfile -e "/tmp/trinohub-plugin-openapi.zip"', script)
+        self.assertIn(
+            'mv "/tmp/trinohub-plugin-openapi/trino-openapi-2.0" "/opt/trino/plugin/openapi"', script
+        )
+        self.assertIn("connector.name=openapi", script)
+        # The hash check runs before unpacking.
+        self.assertLess(script.index("sha256sum -c"), script.index("python3 -m zipfile"))
+
+    def test_read_only_catalog_renders_select_only_rules_without_policies(self):
+        self._catalog()
+        self._catalog("api_rw", access_mode="read_write")
+        cluster = self._cluster(["system", "api", "api_rw"])
+        rules = json.loads(self.app.render_access_control_rules(cluster))
+        self.assertEqual(
+            rules,
+            {
+                "tables": [
+                    {"catalog": "(api)", "privileges": ["SELECT"]},
+                    {"privileges": list(DATA_POLICY_PRIVILEGES) + ["OWNERSHIP"]},
+                ]
+            },
+        )
+
+    def test_read_write_catalog_needs_no_rules(self):
+        self._catalog(access_mode="read_write")
+        cluster = self._cluster(["system", "api"])
+        self.assertIsNone(self.app.render_access_control_rules(cluster))
+
+    def test_read_only_catalog_clamps_policies_and_unrestricted_users(self):
+        self._catalog()
+        cluster = self._cluster(["system", "api"])
+        self.app.create_role({"name": "analysts"}, self.admin)
+        self.app.create_user({"username": "dana", "password": "pw-123456789", "roles": ["analysts"]}, self.admin)
+        self.app.create_data_policy(
+            {"role": "analysts", "catalog": "api", "privileges": ["SELECT", "INSERT"]}, self.admin
+        )
+        tables = json.loads(self.app.render_access_control_rules(cluster))["tables"]
+        policy_rule = next(rule for rule in tables if "dana" in rule.get("user", "") and rule.get("catalog") == "api")
+        self.assertEqual(policy_rule["privileges"], ["SELECT"])
+        read_only_rule = next(rule for rule in tables if rule.get("catalog") == "(api)")
+        self.assertTrue(read_only_rule["user"].startswith("(?!"))
+        self.assertEqual(read_only_rule["privileges"], ["SELECT"])
+        # The SELECT-only rule must win over the catch-all for unrestricted users.
+        catch_all = next(rule for rule in tables if "OWNERSHIP" in rule["privileges"])
+        self.assertLess(tables.index(read_only_rule), tables.index(catch_all))
+
+    def test_connector_schema_lists_supported_trino_versions(self):
+        schema = next(c for c in connector_types_catalog() if c["type"] == "openapi")
+        self.assertEqual(schema["trino_versions"], ["483", "484"])
+        self.assertEqual(schema["group"], "Web APIs")
+        auth = next(f for f in schema["fields"] if f["name"] == "auth_type")
+        self.assertEqual([o["value"] for o in auth["options"]], ["none", "basic", "bearer", "api_key"])
 
 
 if __name__ == "__main__":
